@@ -1,5 +1,5 @@
 import polygonClipping, { type MultiPolygon, type Polygon, type Ring } from 'polygon-clipping';
-import type { PathPoint, Pt, SceneNode } from './types';
+import type { BoolOp, Doc, PathPoint, Pt, SceneNode } from './types';
 import { bbox } from './doc';
 
 /** Normalised rings of a path node (single-ring paths use `points`). */
@@ -167,7 +167,7 @@ export function toPolygons(n: SceneNode): Pt[][] | null {
 
 const toGeom = (rings: Pt[][]): Polygon => rings.map((r) => [...r.map((p) => [p.x, p.y] as [number, number]), [r[0].x, r[0].y]] as Ring);
 
-export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
+export type { BoolOp };
 
 /** Runs a boolean op over shapes ordered bottom → top. Returns absolute rings. */
 export function booleanRings(op: BoolOp, shapes: Pt[][][]): Pt[][] {
@@ -179,4 +179,21 @@ export function booleanRings(op: BoolOp, shapes: Pt[][][]): Pt[][] {
   else if (op === 'intersect') out = polygonClipping.intersection(first, ...rest);
   else out = polygonClipping.xor(first, ...rest);
   return out.flatMap((poly) => poly.map((ring) => ring.slice(0, -1).map(([x, y]) => ({ x, y }))));
+}
+
+/** Result outline of a live boolean group (children combined, nested boolean groups included). */
+export function liveBooleanRings(doc: Doc, n: SceneNode, depth = 0): Pt[][] {
+  if (depth > 8) return [];
+  const polys = n.children
+    .map((id) => doc.nodes[id])
+    .filter((c) => c && c.visible)
+    .map((c) => (c.booleanOp ? liveBooleanRings(doc, c, depth + 1) : toPolygons(c)))
+    .filter((p): p is Pt[][] => !!p && p.length > 0);
+  if (!polys.length) return [];
+  if (polys.length === 1) return polys[0];
+  try {
+    return booleanRings(n.booleanOp ?? 'union', polys);
+  } catch {
+    return polys.flat();
+  }
 }

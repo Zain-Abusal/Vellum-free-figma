@@ -41,6 +41,8 @@ function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest):
 }
 
 const LS = 'vellum:file:';
+/** Files whose latest version is safely in IndexedDB (their localStorage mirror is just a backup). */
+const persisted = new Set<string>();
 
 type LocalRecord = FileRecord & { partial?: boolean };
 
@@ -78,8 +80,9 @@ export function saveLocal(f: FileRecord): boolean {
   };
   const full: LocalRecord = { ...f, thumb: undefined };
   if (tryWrite(full)) return true;
+  // Only evict mirrors flagged as already persisted to IndexedDB, so we never drop the newest copy of a file.
   const others = lsKeys()
-    .filter((k) => k !== LS + f.id)
+    .filter((k) => k !== LS + f.id && persisted.has(k.slice(LS.length)))
     .map((k) => ({ k, t: readLocal(k.slice(LS.length))?.updated ?? 0 }))
     .sort((a, b) => a.t - b.t);
   for (const o of others) {
@@ -129,9 +132,11 @@ export async function getFile(id: string) {
 
 export async function putFile(f: FileRecord) {
   saveLocal(f);
-  await tx<IDBValidKey>('readwrite', (s) => s.put(f)).catch((e) => {
-    if (!readLocal(f.id)) throw e;
-  });
+  await tx<IDBValidKey>('readwrite', (s) => s.put(f))
+    .then(() => persisted.add(f.id))
+    .catch((e) => {
+      if (!readLocal(f.id)) throw e;
+    });
 }
 
 export async function deleteFile(id: string) {

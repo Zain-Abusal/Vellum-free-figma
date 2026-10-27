@@ -115,7 +115,7 @@ export function createApi(): ExtensionAPI {
       const w = opts.width ?? Math.min(im.w, 400);
       const h = Math.round((w * im.h) / im.w);
       const at = opts.at ?? worldCenter();
-      return api.create('image', { src: im.src, x: Math.round(at.x - w / 2), y: Math.round(at.y - h / 2), w, h, name: opts.name }, opts.parentId);
+      return api.create('image', { src: im.src, x: Math.round(at.x - w / 2), y: Math.round(at.y - h / 2), w, h, name: opts.name, naturalW: im.w, naturalH: im.h }, opts.parentId);
     },
     addSvg: (svg, opts = {}) => api.addImage('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg), opts),
     select: (ids) => S().select(ids.filter((id) => S().doc.nodes[id])),

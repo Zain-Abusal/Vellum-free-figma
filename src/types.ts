@@ -28,7 +28,12 @@ export interface LayoutGrid {
   visible: boolean;
 }
 
-export type Transition = 'instant' | 'dissolve' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down';
+export type Transition = 'instant' | 'dissolve' | 'smart' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down';
+
+export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
+
+/** Properties that can be bound to a variable. */
+export type VarProp = 'fill' | 'stroke' | 'radius' | 'opacity' | 'gap' | 'padding';
 
 export interface Shadow {
   x: number;
@@ -97,6 +102,14 @@ export interface SceneNode {
   locked: boolean;
   shadow?: Shadow | null;
   innerShadow?: Shadow | null;
+  /** Live (non-destructive) boolean group: children are combined with this operation. */
+  booleanOp?: BoolOp;
+  /** Frame holding variants of one component (names like "Size=Small, State=Hover"). */
+  componentSet?: boolean;
+  /** Variable bindings: property → variable id. */
+  vars?: Partial<Record<VarProp, string>>;
+  /** Frame-level variable mode override: collection id → mode id (inherited by children). */
+  varModes?: Record<string, string>;
   /** This layer masks the layers above it in its group. */
   isMask?: boolean;
   /** Group whose first child is a mask. */
@@ -135,7 +148,15 @@ export interface SceneNode {
   overrides?: Record<string, { text?: string; visible?: boolean; fill?: string | null }>;
   // image
   src?: string;
-  imageFit?: 'fill' | 'fit';
+  imageFit?: 'fill' | 'fit' | 'crop' | 'tile';
+  naturalW?: number;
+  naturalH?: number;
+  /** Crop: zoom (≥1) and focal point (0..1). */
+  cropZoom?: number;
+  cropX?: number;
+  cropY?: number;
+  /** Tile: scale of one tile relative to the image's natural size. */
+  tileScale?: number;
   // frame / component
   autoLayout?: AutoLayout | null;
   clip?: boolean;
@@ -146,6 +167,8 @@ export interface SceneNode {
   /** Frame id, or '__back' to go back. */
   link?: string | null;
   linkTransition?: Transition;
+  /** Navigate to the frame, or open it as an overlay on top. */
+  linkAction?: 'navigate' | 'overlay';
 }
 
 export interface CommentReply {
@@ -188,9 +211,27 @@ export interface TextStyle {
   letterSpacing: number;
 }
 
+export interface Variable {
+  id: string;
+  name: string;
+  type: 'color' | 'number';
+  /** mode id → value */
+  values: Record<string, string | number>;
+}
+
+export interface VarCollection {
+  id: string;
+  name: string;
+  modes: { id: string; name: string }[];
+  defaultMode: string;
+  vars: Variable[];
+}
+
 export interface Styles {
   colors: ColorStyle[];
   texts: TextStyle[];
+  /** Variables live with styles so they sync with the same op. */
+  variables?: VarCollection[];
 }
 
 export interface Doc {

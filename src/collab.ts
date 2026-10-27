@@ -31,6 +31,13 @@ export async function createRoom(name: string, doc: Doc): Promise<{ id: string; 
   return r.json();
 }
 
+/** Issue a new edit token; old edit links (and MCP connections using them) become view-only. */
+export async function rotateRoomToken(roomId: string, token: string): Promise<string> {
+  const r = await fetch('/api/rooms/rotate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room: roomId, token }) });
+  if (!r.ok) throw new Error(await errorText(r));
+  return (await r.json()).token;
+}
+
 export async function fetchRoom(id: string): Promise<{ seq: number; name: string; doc: Doc } | null> {
   const r = await fetch(`/api/room?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
   if (r.status === 404) return null;
@@ -152,7 +159,10 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
   const applyRemote = (ops: Op[], replace?: Doc) => {
     const s = useStore.getState();
     const nameOp = [...ops].reverse().find((o): o is Extract<Op, { t: 'name' }> => o.t === 'name');
-    const fn = (d: Doc) => applyOps(d, ops);
+    // Each produce gets its own copy of the ops: immer freezes inserted objects, and repair/layout
+    // must be able to write to them again when the same ops are rebased onto undo history.
+    const json = JSON.stringify(ops);
+    const fn = (d: Doc) => applyOps(d, JSON.parse(json) as Op[]);
     const doc = replace ? produce(replace, fn) : produce(s.doc, fn);
     applying = true;
     useStore.setState({
@@ -189,7 +199,7 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
     const sentPages = pagesDirty;
     const sentName = nameDirty;
     const sentStyles = stylesDirty;
-    const sentKeys = new Set([...sent.keys(), ...(sentPages ? ['#pages'] : []), ...(sentStyles ? ['#styles'] : [])]);
+    const sentKeys = new Set([...sent.keys(), ...(sentPages ? ['#pages'] : []), ...(sentStyles ? ['#styles'] : []), ...(sentName ? ['#name'] : [])]);
     if (canEdit) {
       pending.clear();
       pagesDirty = false;
@@ -232,7 +242,14 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
           }
         }
         if (remote.length) {
-          applyRemote(remote);
+          try {
+            applyRemote(remote);
+          } catch (err) {
+            // Never get stuck: if remote changes can't be applied incrementally, reload the snapshot.
+            console.error('Applying remote changes failed; reloading the shared file', err);
+            const snap = await fetchRoom(roomId);
+            if (snap) applyRemote(pendingOps(), snap.doc);
+          }
           gotRemote = true;
         }
         seq = j.seq;

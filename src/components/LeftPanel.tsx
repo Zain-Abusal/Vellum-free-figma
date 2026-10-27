@@ -6,6 +6,7 @@ import { renderNode } from '../render';
 import { Icons, TypeIcon } from './icons';
 
 let dragId: string | null = null;
+const LAYER_MIME = 'application/x-vellum-layer';
 
 function InlineName({ value, onDone, className }: { value: string; onDone: (v: string) => void; className?: string }) {
   const [v, setV] = useState(value);
@@ -76,9 +77,15 @@ function LayerRow({ id, depth, flat }: { id: string; depth: number; flat?: boole
         onDragStart={(e) => {
           dragId = id;
           e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData(LAYER_MIME, id);
+        }}
+        onDragEnd={() => {
+          dragId = null;
+          setZone(null);
         }}
         onDragOver={(e) => {
-          if (!dragId || dragId === id) return;
+          // Only react to our own layer drags (not files dragged in from the desktop).
+          if (!dragId || dragId === id || !e.dataTransfer.types.includes(LAYER_MIME)) return;
           e.preventDefault();
           const r = e.currentTarget.getBoundingClientRect();
           const f = (e.clientY - r.top) / r.height;
@@ -87,7 +94,7 @@ function LayerRow({ id, depth, flat }: { id: string; depth: number; flat?: boole
         onDragLeave={() => setZone(null)}
         onDrop={(e) => {
           e.preventDefault();
-          if (dragId && zone) moveLayer(dragId, id, zone);
+          if (dragId && zone && e.dataTransfer.types.includes(LAYER_MIME)) moveLayer(dragId, id, zone);
           setZone(null);
           dragId = null;
         }}
@@ -303,6 +310,9 @@ function Assets() {
       </div>
       <div className="section-head">
         <span className="section-toggle">Styles</span>
+        <button className="link-btn" onClick={() => useStore.getState().set({ variablesOpen: true })}>
+          Variables…
+        </button>
       </div>
       <StyleRows />
     </div>

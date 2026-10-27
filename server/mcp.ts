@@ -6,7 +6,10 @@ import type { Doc, NodeType, SceneNode } from '../src/types';
 /*
  * MCP server (Streamable HTTP, stateless JSON-RPC) for live Vellum files.
  * An AI agent connects with the URL from Share → "Connect an AI agent":
- *   POST /api/mcp?room=<id>&token=<edit token>&name=<agent name>
+ *   POST /api/mcp?name=<agent name>
+ *   Authorization: Bearer <project edit token>
+ * The token is the file's edit token, so it both authenticates and identifies the file.
+ * Read-only access (no token) uses ?room=<id> instead.
  * It can see who is online (cursors, selections), read and render the file, and edit it.
  * Edits are pushed as normal sync ops, so everyone sees them appear live, and the agent
  * shows up as a 🤖 collaborator with its own cursor.
@@ -46,7 +49,7 @@ async function sha256(s: string) {
 /* ---------- room access ---------- */
 
 async function loadDoc(ctx: Ctx) {
-  if (!ctx.room) throw new Error('No file connected. Use the MCP URL from Vellum → Share → "Connect an AI agent" (it includes ?room=…).');
+  if (!ctx.room) throw new Error('No file connected. Use the setup from Vellum → Share → "Connect an AI agent".');
   const snap = await getStore().snapshot(ctx.room);
   if (!snap) throw new Error('This shared file was not found (it may have expired).');
   const nodes: Record<string, SceneNode> = {};
@@ -87,7 +90,13 @@ async function sync(ctx: Ctx, presence: Omit<Presence, 'id' | 'name' | 'color'>,
   });
   if (r.missing) throw new Error('This shared file was not found.');
   if (ops?.list.length && !r.pushed) throw new Error('This is a view-only link, so edits are not allowed. Use the edit link from Share.');
-  return r.presence.map((p) => JSON.parse(p.slice(p.indexOf('|') + 1)) as Presence);
+  return r.presence.flatMap((p) => {
+    try {
+      return [JSON.parse(p.slice(p.indexOf('|') + 1)) as Presence];
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** Run an edit against the latest snapshot and push only what changed. */
@@ -222,11 +231,69 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { id: str('Layer id.') }, required: ['id'] },
   },
   {
+    name: 'watch_changes',
+    description:
+      'Follow the file live: waits up to 20 seconds for anyone to edit layers, rename the file, or change what they have selected, then reports what changed and who did it. Returns a `since` cursor; pass it to the next call to keep watching without missing anything.',
+    inputSchema: { type: 'object', properties: { since: num('Cursor from the previous watch_changes call (omit to start watching from now).'), timeoutSeconds: num('Max seconds to wait (1-20, default 20).') } },
+  },
+  {
     name: 'point_at',
     description: 'Move your 🤖 cursor to a layer and highlight it for everyone, e.g. to show the user what you are talking about.',
     inputSchema: { type: 'object', properties: { id: str('Layer id.') }, required: ['id'] },
   },
 ];
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Long-poll the room's change log (and presence) for activity by anyone except this agent. */
+async function watch(ctx: Ctx, since: number | undefined, timeoutS: number) {
+  const store = getStore();
+  const first = await loadDoc(ctx);
+  let cursor = since ?? first.seq;
+  const deadline = Date.now() + Math.min(20, Math.max(1, timeoutS)) * 1000;
+  const selKey = (ps: Presence[]) => ps.map((p) => `${p.id}:${p.pageId}:${p.selection.join(',')}`).sort().join('|');
+  const initialPeers = await sync(ctx, { pageId: first.doc.pages[0].id, cursor: null, selection: [] });
+  const humans = (ps: Presence[]) => ps.filter((p) => p.id !== ctx.clientId);
+  const startSel = selKey(humans(initialPeers));
+  for (;;) {
+    const r = await store.sync({ room: ctx.room, clientId: ctx.clientId, since: cursor, tokenHash: '', presence: JSON.stringify({ id: ctx.clientId, name: `🤖 ${ctx.agent}`, color: AGENT_COLOR, pageId: first.doc.pages[0].id, cursor: null, selection: [] }), now: Date.now(), opsJson: '', upserts: [], dels: [], pages: '', name: '', styles: '' });
+    if (r.missing) throw new Error('This shared file was not found.');
+    const peers = humans(r.presence.flatMap((p) => { try { return [JSON.parse(p.slice(p.indexOf('|') + 1)) as Presence]; } catch { return []; } }));
+    const nameOf = new Map(peers.map((p) => [p.id, p.name]));
+    const lines: string[] = [];
+    if (r.reset) lines.push('The file changed a lot since your cursor; call get_document for the current state.');
+    for (const e of r.entries) {
+      const a = e.indexOf('|');
+      const b = e.indexOf('|', a + 1);
+      const who = e.slice(a + 1, b);
+      if (who === ctx.clientId) continue;
+      let ops: { t: string; node?: SceneNode; id?: string; name?: string }[] = [];
+      try {
+        ops = JSON.parse(e.slice(b + 1));
+      } catch {
+        continue;
+      }
+      const by = nameOf.get(who) ?? 'Someone';
+      const changed = ops.filter((o) => o.t === 'node' && o.node).map((o) => `${o.node!.name} [${o.node!.type}] id=${o.node!.id}`);
+      const deleted = ops.filter((o) => o.t === 'del').length;
+      if (changed.length) lines.push(`${by} changed ${changed.length} layer${changed.length > 1 ? 's' : ''}: ${changed.slice(0, 12).join('; ')}${changed.length > 12 ? '…' : ''}`);
+      if (deleted) lines.push(`${by} deleted ${deleted} layer${deleted > 1 ? 's' : ''}.`);
+      if (ops.some((o) => o.t === 'pages')) lines.push(`${by} changed pages or page structure.`);
+      if (ops.some((o) => o.t === 'name')) lines.push(`${by} renamed the file.`);
+    }
+    if (selKey(peers) !== startSel) {
+      const doc = (await loadDoc(ctx)).doc;
+      for (const p of peers) {
+        const sel = p.selection.map((id) => doc.nodes[id]).filter(Boolean);
+        lines.push(`${p.name} now has ${sel.length ? 'selected: ' + sel.map((n) => brief(n)).join('; ') : 'nothing selected'}.`);
+      }
+    }
+    cursor = r.reset ? r.seq : Math.max(cursor, r.seq);
+    if (lines.length) return `${lines.join('\n')}\n\nsince=${cursor} (pass this to watch_changes to keep following)`;
+    if (Date.now() > deadline) return `No changes in the last ${Math.round(timeoutS)} s.\n\nsince=${cursor}`;
+    await sleep(1000);
+  }
+}
 
 async function userPage(ctx: Ctx, doc: Doc) {
   const peers = (await sync(ctx, { pageId: doc.pages[0].id, cursor: null, selection: [] })).filter((p) => !p.name.startsWith('🤖'));
@@ -273,13 +340,16 @@ async function callTool(ctx: Ctx, name: string, args: Record<string, unknown>): 
       if (!['frame', 'rect', 'ellipse', 'text', 'path', 'image', 'component'].includes(type)) throw new Error('Unsupported type.');
       const { doc: peek } = await loadDoc(ctx);
       const pageId = String(args.pageId ?? (await userPage(ctx, peek)));
+      if (!peek.pages.some((p) => p.id === pageId)) throw new Error(`pageId not found. Pages: ${peek.pages.map((p) => `${p.name} [${p.id}]`).join(', ')}`);
       return edit(ctx, (doc) => {
         const parentId = args.parentId ? String(args.parentId) : null;
         if (parentId && !doc.nodes[parentId]) throw new Error('parentId not found.');
         if (parentId && !isFrameLike(doc.nodes[parentId])) throw new Error('parentId must be a frame, section or component.');
-        const top = getPage(doc, pageId).children.map((id) => doc.nodes[id]).filter(Boolean);
+        // Inside a parent, the layer always lives on the parent's page.
+        const page = parentId ? doc.nodes[parentId].pageId : pageId;
+        const top = getPage(doc, page).children.map((id) => doc.nodes[id]).filter(Boolean);
         const b = bbox(top);
-        const n = makeNode(type, pageId, {
+        const n = makeNode(type, page, {
           name: args.name ? String(args.name) : nextName(doc, type),
           x: Number(args.x ?? (parentId ? doc.nodes[parentId].x + 16 : b ? b.x + b.w + 80 : 0)),
           y: Number(args.y ?? (parentId ? doc.nodes[parentId].y + 16 : b ? b.y : 0)),
@@ -306,6 +376,8 @@ async function callTool(ctx: Ctx, name: string, args: Record<string, unknown>): 
         removeNode(doc, n.id);
         return { text: `Deleted ${n.name}.`, pageId: n.pageId };
       });
+    case 'watch_changes':
+      return watch(ctx, args.since === undefined ? undefined : Number(args.since), Number(args.timeoutSeconds ?? 20));
     case 'point_at': {
       const { doc } = await loadDoc(ctx);
       const n = doc.nodes[String(args.id)];
@@ -334,7 +406,7 @@ async function dispatch(ctx: Ctx, m: RpcMsg) {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'vellum', title: 'Vellum design file', version: '0.5.0' },
         instructions:
-          'You are connected to a live Vellum design file that people may be editing right now. Start with get_live_view to see who is online and what they selected, use get_document / render_svg to look at the design, then create_layer / update_layer to make changes. Everyone sees your edits and your 🤖 cursor live.',
+          'You are connected to a live Vellum design file that people may be editing right now. Start with get_live_view to see who is online and what they selected, use get_document / render_svg to look at the design, then create_layer / update_layer to make changes. Everyone sees your edits and your 🤖 cursor live. To follow along as people work, call watch_changes repeatedly with the returned `since` cursor.',
       };
     case 'ping':
       return {};
@@ -366,9 +438,33 @@ export async function handleMcp(req: Request, url: URL): Promise<Response> {
 
   const session = (req.headers.get('mcp-session-id') ?? '').replace(/[^A-Za-z0-9]/g, '').slice(0, 24);
   const agent = (url.searchParams.get('name') ?? 'AI agent').slice(0, 30);
+
+  // Auth: the project's edit token as a Bearer token. It also tells us which file this is.
+  const auth = req.headers.get('authorization') ?? '';
+  const bearer = /^Bearer\s+(\S+)$/i.exec(auth)?.[1] ?? '';
+  // Legacy: ?token= in the URL still works, but secrets in URLs end up in logs, so prefer the header.
+  const token = (bearer || url.searchParams.get('token') || '').replace(/[^A-Za-z0-9]/g, '');
+  let room = (url.searchParams.get('room') ?? '').replace(/[^A-Za-z0-9]/g, '');
+  const unauthorized = (message: string) =>
+    new Response(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32001, message } }), {
+      status: 401,
+      headers: { ...CORS, 'content-type': 'application/json', 'www-authenticate': 'Bearer realm="vellum", error="invalid_token"' },
+    });
+  if (auth && !bearer) return unauthorized('Malformed Authorization header. Use: Authorization: Bearer <project token>');
+  if (token) {
+    const hash = await sha256(token);
+    if (room) {
+      if (!(await getStore().tokenMatches(room, hash))) return unauthorized('This token is not valid for this file.');
+    } else {
+      room = (await getStore().roomForToken(hash)) ?? '';
+      if (!room) return unauthorized('Unknown or expired project token. Copy a fresh one from Share → Connect an AI agent.');
+    }
+  } else if (!room) {
+    return unauthorized('Missing credentials. Send your project token as "Authorization: Bearer <token>" (Share → Connect an AI agent), or use ?room=<id> for read-only access.');
+  }
   const ctx: Ctx = {
-    room: (url.searchParams.get('room') ?? '').replace(/[^A-Za-z0-9]/g, ''),
-    token: (url.searchParams.get('token') ?? '').replace(/[^A-Za-z0-9]/g, ''),
+    room,
+    token,
     agent,
     clientId: ('mcp' + (session || agent.replace(/[^A-Za-z0-9]/g, '') + 'agent')).slice(0, 40).padEnd(8, '0'),
   };

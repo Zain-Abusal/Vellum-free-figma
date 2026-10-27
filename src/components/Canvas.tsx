@@ -1,16 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { fontStack, NodeView } from '../render';
-import { ancestry, bbox, cloneSubtree, descendants, frameAt, getPage, insert, inside, intersects, isFrameLike, makeNode, moveDeep, moveTo, nextName, pathFromAbs, removeNode, resizeTo, siblings, type Box } from '../doc';
+import { ancestry, bbox, cloneSubtree, frameAt, getPage, insert, inside, intersects, isFrameLike, makeNode, moveDeep, moveTo, nextName, pathFromAbs, removeNode, resizeTo, siblings, type Box, descendants } from '../doc';
 import { absRings, getRings, ringsFromAbs, ringsToD, setAbsRings, shapePoints } from '../geometry';
 import { addImageFiles, editText, insertInstance, resolveHit, setProps, topLevel, viewport, zoomToFit } from '../actions';
 import { reportCursor } from '../collab';
 import { CURSOR, HANDLE_ANGLE, resizeCursor } from '../cursors';
 import { loadPrefs } from '../files';
-import type { Doc, PathPoint, Pt, SceneNode } from '../types';
+import type { PathPoint, Pt, SceneNode } from '../types';
 import ContextMenu from './ContextMenu';
+import { handlePos, snap } from '../canvasMath';
 import { useUiPrefs } from '../uiPrefs';
 import { CommentsLayer, Measure, Rulers } from './Overlays';
+import { LayoutGrids } from './LayoutGrids';
 
 type Drag =
   | { kind: 'pan'; sx: number; sy: number; cx: number; cy: number }
@@ -34,47 +36,6 @@ interface MoveEvent {
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const ACCENT = 'var(--accent)';
 const PURPLE = 'var(--component)';
-
-function handlePos(h: string, b: Box): Pt {
-  const x = h.includes('w') ? b.x : h.includes('e') ? b.x + b.w : b.x + b.w / 2;
-  const y = h.includes('n') ? b.y : h.includes('s') ? b.y + b.h : b.y + b.h / 2;
-  return { x, y };
-}
-
-/** Snap a moving box to sibling / parent edges and centres. */
-function snap(doc: Doc, ids: string[], box: Box, dx: number, dy: number, th: number) {
-  const first = doc.nodes[ids[0]];
-  const parent = first.parentId ? doc.nodes[first.parentId] : null;
-  if (parent?.autoLayout) return { dx: 0, dy: 0, gx: null, gy: null };
-  const cand: Box[] = [];
-  for (const id of siblings(doc, first)) {
-    const n = doc.nodes[id];
-    if (!ids.includes(id) && n?.visible) cand.push(n);
-  }
-  if (parent) cand.push(parent);
-  const bx = [box.x + dx, box.x + dx + box.w / 2, box.x + dx + box.w];
-  const by = [box.y + dy, box.y + dy + box.h / 2, box.y + dy + box.h];
-  let sx: number | null = null, sy: number | null = null, gx: number | null = null, gy: number | null = null;
-  for (const c of cand) {
-    for (const t of [c.x, c.x + c.w / 2, c.x + c.w])
-      for (const a of bx) {
-        const diff = t - a;
-        if (Math.abs(diff) <= th && (sx === null || Math.abs(diff) < Math.abs(sx))) {
-          sx = diff;
-          gx = t;
-        }
-      }
-    for (const t of [c.y, c.y + c.h / 2, c.y + c.h])
-      for (const a of by) {
-        const diff = t - a;
-        if (Math.abs(diff) <= th && (sy === null || Math.abs(diff) < Math.abs(sy))) {
-          sy = diff;
-          gy = t;
-        }
-      }
-  }
-  return { dx: sx ?? 0, dy: sy ?? 0, gx, gy };
-}
 
 /** Pages on the default background follow the light/dark theme. */
 const DEFAULT_BG = '#f5f5f5';
@@ -1090,46 +1051,5 @@ export default function Canvas() {
       <CommentsLayer cam={camera} draft={draft} setDraft={setDraft} />
       {menu && <ContextMenu at={menu} onClose={() => setMenu(null)} />}
     </div>
-  );
-}
-
-/** Layout grid overlays for frames (not exported, toggle with ⌃⇧4). */
-function LayoutGrids({ doc, ids }: { doc: Doc; ids: string[] }) {
-  const frames: SceneNode[] = [];
-  const walk = (list: string[]) => {
-    for (const id of list) {
-      const n = doc.nodes[id];
-      if (!n || !n.visible) continue;
-      if (n.layoutGrid?.visible && isFrameLike(n)) frames.push(n);
-      if (isFrameLike(n) || n.type === 'group') walk(n.children);
-    }
-  };
-  walk(ids);
-  return (
-    <g className="layout-grids" pointerEvents="none">
-      {frames.map((f) => {
-        const g = f.layoutGrid!;
-        const rects: [number, number, number, number][] = [];
-        if (g.type === 'grid') {
-          const sz = Math.max(1, g.size);
-          for (let x = 0; x < f.w; x += sz) rects.push([f.x + x, f.y, 0.5, f.h]);
-          for (let y = 0; y < f.h; y += sz) rects.push([f.x, f.y + y, f.w, 0.5]);
-        } else {
-          const len = g.type === 'columns' ? f.w : f.h;
-          const cell = Math.max(0, (len - g.margin * 2 - g.gutter * (g.count - 1)) / Math.max(1, g.count));
-          for (let i = 0; i < g.count; i++) {
-            const o = g.margin + i * (cell + g.gutter);
-            rects.push(g.type === 'columns' ? [f.x + o, f.y, cell, f.h] : [f.x, f.y + o, f.w, cell]);
-          }
-        }
-        return (
-          <g key={f.id} clipPath={undefined}>
-            {rects.map(([x, y, w, h], i) => (
-              <rect key={i} x={x} y={y} width={w} height={h} fill={g.color} fillOpacity={g.type === 'grid' ? 0.6 : 0.12} />
-            ))}
-          </g>
-        );
-      })}
-    </g>
   );
 }

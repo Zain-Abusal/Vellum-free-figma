@@ -7,13 +7,18 @@ type Handler = (req: Request) => Promise<Response>;
 /** Serves /api/* locally with the same handlers Vercel runs as Edge Functions (in-memory rooms unless Upstash env vars are set). */
 function localApi(): Plugin {
   const middleware = (load: () => Promise<Handler>) => async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    // Sandboxed extensions (opaque origin) import modules from /extensions/: allow CORS like vercel.json does.
+    if (req.url?.startsWith('/extensions/')) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return next();
+    }
     if (!req.url?.startsWith('/api/')) return next();
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
     const request = new Request('http://localhost' + req.url, {
       method: req.method,
-      headers: Object.fromEntries(Object.entries(req.headers).filter(([k, v]) => typeof v === 'string' && ['content-type', 'mcp-session-id', 'mcp-protocol-version', 'accept'].includes(k)) as [string, string][]),
+      headers: Object.fromEntries(Object.entries(req.headers).filter(([k, v]) => typeof v === 'string' && ['content-type', 'mcp-session-id', 'mcp-protocol-version', 'accept', 'authorization'].includes(k)) as [string, string][]),
       body: hasBody ? Buffer.concat(chunks) : undefined,
     });
     const r = await (await load())(request);

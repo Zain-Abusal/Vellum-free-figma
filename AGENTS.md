@@ -22,9 +22,12 @@ A change is done when **`npm run build` and `npm run test:e2e` both pass**. For 
 src/
   types.ts        Data model (SceneNode, Page, Doc…). Start here.
   doc.ts          Pure tree helpers + layoutAll() (text measuring, group bounds, auto layout, constraints)
-  geometry.ts     Paths, polygons/stars, boolean ops (polygon-clipping), flatten
+  geometry.ts     Paths & bezier curves, polygons/stars, boolean ops (polygon-clipping), live boolean outlines
+  svgImport.ts    SVG → editable vector layers (path parser incl. arcs, transforms, sanitizing)
+  canvasMath.ts   Pure canvas math (handles, snapping)
   store.ts        zustand store: doc, selection, camera, undo/redo, UI flags
-  actions.ts      Every editor command (group, align, boolean, comments, camera animation…)
+  actions/        Editor commands split by area (camera, selection, edit, structure, components, shapes,
+                  pages, comments, images, styles, variables, navigation, prototype, presets…); import from `../actions`
   render.tsx      SVG renderer: renderNode() (static: export/present) and NodeView (memoized live canvas)
   exporter.tsx    SVG/PNG/JPG/PDF/ZIP export, font embedding, clipboard, dev-mode CSS
   codegen.ts      Inspect: Tailwind classes and React (inline styles or Tailwind) code
@@ -34,8 +37,11 @@ src/
   collab.ts       Live collaboration client (diff → ops → /api/sync polling)
   cursors.ts      Custom Figma-style cursors (SVG data URLs)
   zip.ts          Tiny store-only ZIP writer
-  extensions/     Plugin system: types.ts (API), api.ts (implementation), registry.ts (auto-discovery), one folder per extension
-  components/     Canvas, panels, toolbar/top bar (Chrome.tsx), overlays (rulers, measure, comments), Home, Editor
+  extensions/     Plugin system: types.ts (API), api.ts (implementation), registry.ts (auto-discovery),
+                  remote.ts (sandboxed URL extensions), one folder per built-in extension
+  components/     Canvas, LeftPanel, toolbar/top bar (Chrome.tsx), overlays, LayoutGrids, Home, Editor
+  components/panels/  Right panel split by tab/section: controls, Design, FillSection, ImageSection, VariablesUI,
+                  InstanceProps, FramePresets, ExportSection, Prototype, Inspect
 server/           Backend: store.ts (Upstash Redis Lua + in-memory fallback), handlers.ts (HTTP), mcp.ts (MCP server for AI agents)
 api/              Vercel Edge Function entry points (thin wrappers around server/handlers.ts)
 scripts/e2e.mjs   End-to-end tests
@@ -54,6 +60,7 @@ docs/MCP.md         Connecting AI agents over MCP
 5. **Live canvas = `NodeView`.** Each layer subscribes only to its own node. Keep node objects referentially stable (immer does this), or every layer re-renders.
 6. **Collaboration diffs by reference.** `collab.ts` sends every node whose object identity changed. Unnecessary new objects mean unnecessary network traffic.
 7. **Tree repair:** after remote ops, `repair()` fixes orphans and duplicate children. Run it when you add new parent/child relationships.
+   Remote ops are rebased onto every undo-history doc: **give each `produce` its own copy of the ops** (immer freezes inserted objects, and layout must write to them).
 8. **Text auto-sizes.** `w/h` of text nodes are derived. Change `fontSize`, not `h`.
 
 ### Adding a layer property (checklist)
@@ -65,7 +72,7 @@ docs/MCP.md         Connecting AI agents over MCP
 - Vercel can't hold WebSockets, so clients **poll** `POST /api/sync`. That's ~300 ms while active, slowing to 1.2–3 s when idle and 5 s in hidden tabs.
 - Each sync is **one atomic Lua script** in Upstash Redis. It applies my ops, appends them to a log (sorted set, last 400 batches), writes my presence, and returns ops since my cursor plus live peers.
 - Conflict policy: **last writer wins per node**, plus `repair()`. Pages (including comments) are one value. A client that falls behind the log gets `reset` and reloads the snapshot.
-- Links: `#/room/<id>/<token>` = edit, `#/room/<id>` = view-only. The server stores only `sha256(token)`. Rooms expire 30 days after the last edit.
+- Links: `#/room/<id>/<token>` = edit, `#/room/<id>` = view-only. The server stores only `sha256(token)` (and a `vellum:tok:<hash> → room` index used by MCP Bearer auth). Rooms expire 30 days after the last edit.
 - Free-tier budget: one Redis command per sync. See the README for numbers.
 
 ## User research → features
@@ -123,17 +130,19 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ✅ Prototype links + Present mode, Inspect (CSS)
 - ✅ Comments (pins, threads, resolve) stored in the file
 - ✅ Bezier pen (drag to pull handles), curve handles in vector edit (Alt breaks symmetry), double-click a point to toggle smooth/sharp
-- ⬜ Live (non-destructive) boolean groups
+- ✅ Live (non-destructive) boolean groups (switch operation in the Design panel, ⌘E flattens)
 - ✅ Instance overrides: per-instance text and layer visibility (Design → Instance properties), reset
-- ⬜ Component variants / typed component properties
+- ✅ Component variants: Combine as variants, `Prop=Value` names, per-property dropdowns on instances
+- ⬜ Typed component properties (boolean/instance-swap) beyond variants
 - ✅ Fixed-width wrapping text (auto width / auto height; side handles set width)
 - ⬜ Rich text spans (mixed styles in one text layer)
 - ✅ Linked color & text styles (Assets → Styles, Design panel pickers)
-- ⬜ Variables / modes
+- ✅ Variables with modes (color + number), bind fill/stroke/radius/opacity/gap/padding, per-frame mode override, Variables window
 - ✅ Layout grids (columns / rows / grid, ⌃⇧4), masks (⌥⌘M, alpha mask groups)
-- ⬜ Image crop mode
+- ✅ Image fill modes: fill, fit, crop (zoom + focal point), tile
 - ✅ Prototype transitions (dissolve, slide ×4), Back action, hotspot flash on misclick
-- ⬜ Smart animate, overlays, scroll/overflow behaviour
+- ✅ Prototype overlays and Smart animate (matching layer names glide between frames)
+- ⬜ Scroll/overflow behaviour, interactive components
 
 ### Files, storage, export
 - ✅ IndexedDB storage + synchronous localStorage mirror (flush on tab close), quota eviction
@@ -143,23 +152,27 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ✅ Copy as PNG / SVG / CSS
 - ✅ Import / download `.json`
 - ⬜ Import `.fig` files (closed format, so probably never; SVG import is more realistic)
-- ⬜ SVG import as editable vectors
+- ✅ SVG import as editable vectors (drop/paste/place .svg or paste SVG markup)
 
 ### Collaboration (Vercel + Upstash Redis)
-- ✅ **MCP server** for AI agents (`/api/mcp`): live view of collaborators, read/render/edit tools, 🤖 presence cursor
+- ✅ MCP `watch_changes`: agents long-poll to follow edits and selection changes live
+- ✅ **MCP server** for AI agents (`/api/mcp`): live view of collaborators, read/render/edit tools, 🤖 presence cursor; auth = project edit token as `Authorization: Bearer` (token → file index, 401 otherwise)
 - ✅ Rooms, edit and view-only invite links, live sync, cursors, selections, avatars, jump-to-person
 - ✅ Local dev without Redis (in-memory store)
 - 🟡 Undo in shared files is local-only and rebased over remote ops (not per-user operational undo)
-- ⬜ Accounts / auth, per-person permissions, revoking links
+- ✅ Revoking access: Share → Reset edit link (rotates the token; old links and MCP connections become view-only/401)
+- ⬜ Accounts / auth, per-person permissions
 - ⬜ Images in Vercel Blob instead of inline data URLs (large images bloat sync)
 - ⬜ CRDT (e.g. Yjs) for character-level concurrent text editing
 
 ### Extensions
 - ✅ Extension API, auto-discovery, forms, search pickers, one-undo-step runs, run-last (⌘⌥P)
 - ✅ Built-in: QR Code, Avatars, Blob Generator, Table, Shadow Presets, Emoji, Export to HTML, Radial Repeat, Lorem Ipsum, Placeholder Images, Icons, Color Palette, Contrast Checker, Batch Rename, Find & Replace, Arrange in Grid, Clean Document, Random Data, Bar Chart
-- ⬜ Load third-party extensions at runtime (would need sandboxing in an iframe)
+- ✅ Third-party extensions from a URL, sandboxed in an opaque-origin iframe with a whitelisted API bridge
 
 ## Changelog
+
+- **2026-10-27**: v0.6. Fixed: remote edits crashing sync for clients with undo history (no live edits), unvalidated presence able to crash collaborators, file-name sync race, auto-layout fill/stretch layout, flatten deleting frame contents, stale layer drag, MCP pageId, SVG import, localStorage eviction. Added: live booleans, variants, variables & modes, image crop/tile, SVG import, overlays & smart animate, edit-link revocation, sandboxed URL extensions, MCP `watch_changes`. Refactor: `actions/` modules, `components/panels/`, canvas helpers.
 
 - **2026-10-27**: v0.5. Figma parity: bezier pen + curve editing, auto layout v2, frame presets, per-corner radius, dashed strokes, inner shadow, masks, layout grids, instance overrides, eyedropper, scale tool, prototype transitions/back, Tailwind/React codegen. Own identity (violet/teal, Geist, island panels, round handles, dotted canvas, new logo). 7 new extensions (19 total). MCP server so AI agents can join live files.
 

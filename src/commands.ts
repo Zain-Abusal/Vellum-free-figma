@@ -5,6 +5,7 @@ import {
   autoLayoutSelection,
   booleanOp,
   copyProperties,
+  combineAsVariants,
   copySelection,
   createComponent,
   deleteSelection,
@@ -35,6 +36,7 @@ import {
 } from './actions';
 import { copyAsPNG, copyAsSVG, download, exportLayers } from './exporter';
 import { extensions } from './extensions/registry';
+import { getRemoteExtensions } from './extensions/remote';
 import { setThemePref } from './theme';
 import type { Tool } from './types';
 
@@ -119,6 +121,7 @@ export function buildCommands(): Command[] {
     add('Shape', 'Intersect selection', () => booleanOp('intersect'));
     add('Shape', 'Exclude selection', () => booleanOp('exclude'));
     add('Components', 'Create component', createComponent, `${MOD}${ALT}K`);
+    add('Components', 'Combine as variants', combineAsVariants);
     add('Components', 'Detach instance', detachInstance, `${MOD}${ALT}B`);
     add('Edit', 'Show / hide selection', () => setProps(sel, { visible: !sel.every((id) => s.doc.nodes[id]?.visible) }), `⇧${MOD}H`);
     add('Edit', 'Lock / unlock selection', () => setProps(sel, { locked: !sel.every((id) => s.doc.nodes[id]?.locked) }), `⇧${MOD}L`);
@@ -140,6 +143,7 @@ export function buildCommands(): Command[] {
 
   add('File', 'Present', startPresent);
   add('File', 'Share / invite collaborators', () => s.set({ dialog: 'share' }));
+  add('File', 'Variables (colors & numbers with modes)', () => s.set({ variablesOpen: true }));
   add('File', 'Version history', () => s.set({ dialog: 'versions' }));
   add('File', 'Export frames to PDF', () => exportLayers(s.doc, topFrames(s.doc, s.pageId).map((f) => f.id), [{ format: 'pdf', scale: 2, suffix: '' }], s.fileName));
   add('File', 'Export frames as PNG (ZIP)', () => exportLayers(s.doc, topFrames(s.doc, s.pageId).map((f) => f.id), [{ format: 'png', scale: 2, suffix: '' }], s.fileName));
@@ -155,7 +159,7 @@ export function buildCommands(): Command[] {
   add('Help', 'Keyboard shortcuts', () => s.set({ dialog: 'shortcuts' }), `${MOD}⇧?`);
 
   add('Extensions', 'Browse extensions', () => s.set({ extensionsOpen: true }));
-  for (const e of extensions) add('Extensions', e.name, () => s.set({ extensionsOpen: e.id }), undefined, 'ext:' + e.id);
+  for (const e of [...extensions, ...getRemoteExtensions().flatMap((r) => (r.ext ? [r.ext] : []))]) add('Extensions', e.name, () => s.set({ extensionsOpen: e.id }), undefined, 'ext:' + e.id);
 
   for (const p of s.doc.pages) if (p.id !== s.pageId) add('Pages', `Go to ${p.name}`, () => s.set({ pageId: p.id, selection: [] }), undefined, 'page:' + p.id);
   for (const f of topFrames(s.doc, s.pageId))

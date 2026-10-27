@@ -143,3 +143,29 @@ The layer properties (`fill`, `stroke`, `radius`, `gradient`, `shadow`, `autoLay
 | `clean-document` | Clean Document | Remove hidden or empty layers, round to pixels |
 | `random-data` | Content Reel | Names, emails, cities, dates, prices |
 | `bar-chart` | Chart | Editable bar chart from numbers |
+
+## Third-party extensions (install from a URL)
+
+Extensions don't have to be bundled. Anyone can publish one as a single **ES module** and users install it from **Extensions → Install from URL**.
+
+```js
+// my-extension.js: host it anywhere that sends `Access-Control-Allow-Origin: *`
+export default {
+  id: 'my-extension',
+  name: 'My Extension',
+  description: 'What it does.',
+  icon: '🌐',
+  inputs: [{ key: 'text', label: 'Text', type: 'text', default: 'Hi' }],
+  async run(api, values) {
+    const c = await api.viewportCenter();          // every API call is async here
+    const id = await api.create('text', { text: values.text, x: c.x, y: c.y });
+    await api.select([id]);
+    return 'Done';
+  },
+};
+```
+
+- **Sandboxed:** each installed extension runs in its own `sandbox="allow-scripts"` iframe with an opaque origin. It can't read the page, cookies, storage or other files. It can only call the extension API (the same methods as above) through a message bridge, and only while it's running. Calls outside the allow-list are rejected.
+- **Async API:** because of the sandbox, `await` every `api.*` call. `inputs` work; `picker` is only available to built-in extensions.
+- **Hosting:** the module must be served with CORS (`Access-Control-Allow-Origin: *`). GitHub Pages, jsDelivr and Vercel all work. Vellum serves `/extensions/*` with CORS; see the example at [`public/extensions/hello-remote.js`](../public/extensions/hello-remote.js).
+- Installed URLs are remembered per browser. Remove one with the ✕ next to it.

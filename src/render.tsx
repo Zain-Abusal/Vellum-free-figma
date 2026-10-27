@@ -1,6 +1,6 @@
 import { memo, type ReactNode } from 'react';
 import type { Doc, SceneNode } from './types';
-import { getRings, ringsToD, roundedRectD } from './geometry';
+import { getRings, liveBooleanRings, ringsToD, roundedRectD } from './geometry';
 import { useStore } from './store';
 import { textLines } from './doc';
 
@@ -86,15 +86,37 @@ function drawNode(ctx: RenderCtx, n: SceneNode, child: ChildFn): ReactNode {
       break;
     case 'image': {
       const cid = `img-${key}`;
-      const rounded = n.radius > 0 || !!n.radii;
+      const mode = n.imageFit ?? 'fill';
+      const natural = !!(n.naturalW && n.naturalH);
+      const clip = n.radius > 0 || !!n.radii || (natural && (mode === 'crop' || mode === 'tile'));
+      let img: ReactNode;
+      if (mode === 'crop' && natural) {
+        // Cover the box, zoom in, and position by focal point.
+        const s0 = Math.max(n.w / n.naturalW!, n.h / n.naturalH!) * Math.max(1, n.cropZoom ?? 1);
+        const dw = n.naturalW! * s0;
+        const dh = n.naturalH! * s0;
+        img = <image href={n.src} x={n.x + (n.w - dw) * (n.cropX ?? 0.5)} y={n.y + (n.h - dh) * (n.cropY ?? 0.5)} width={dw} height={dh} preserveAspectRatio="none" clipPath={`url(#${cid})`} />;
+      } else if (mode === 'tile' && natural) {
+        const pid = `tile-${key}`;
+        const tw = n.naturalW! * (n.tileScale ?? 0.25);
+        const th = n.naturalH! * (n.tileScale ?? 0.25);
+        img = (
+          <>
+            <pattern id={pid} patternUnits="userSpaceOnUse" x={n.x} y={n.y} width={tw} height={th}>
+              <image href={n.src} width={tw} height={th} preserveAspectRatio="none" />
+            </pattern>
+            <Box n={n} fill={`url(#${pid})`} />
+          </>
+        );
+      } else img = <image href={n.src} x={n.x} y={n.y} width={n.w} height={n.h} preserveAspectRatio={mode === 'fit' ? 'xMidYMid meet' : 'xMidYMid slice'} clipPath={clip ? `url(#${cid})` : undefined} />;
       body = (
         <>
-          {rounded && (
+          {clip && (
             <clipPath id={cid}>
               <Box n={n} />
             </clipPath>
           )}
-          <image href={n.src} x={n.x} y={n.y} width={n.w} height={n.h} preserveAspectRatio={n.imageFit === 'fit' ? 'xMidYMid meet' : 'xMidYMid slice'} clipPath={rounded ? `url(#${cid})` : undefined} />
+          {img}
           {n.stroke && <Box n={n} fill="none" {...strokeProps(n)} />}
           {ctx.interactive && <rect x={n.x} y={n.y} width={n.w} height={n.h} fill="transparent" />}
         </>
@@ -152,6 +174,13 @@ function drawNode(ctx: RenderCtx, n: SceneNode, child: ChildFn): ReactNode {
     case 'component':
       return wrap(ctx, n, key, frameBody(ctx, n, key, ctx.interactive, child));
     case 'group': {
+      if (n.booleanOp) {
+        // Live boolean: draw the combined outline with the group's own paint; children stay editable in Layers.
+        const rings = liveBooleanRings(ctx.doc, n);
+        const d = rings.map((r) => r.map((p, i) => `${i ? 'L' : 'M'}${p.x} ${p.y}`).join(' ') + ' Z').join(' ');
+        body = <path d={d} fill={fill === 'none' ? '#d9d9d9' : fill} fillRule="evenodd" {...strokeProps(n)} />;
+        break;
+      }
       if (n.masked && n.children.length > 1) {
         // The bottom layer is the mask (alpha), everything above is clipped by it.
         const [m, ...rest] = n.children;
@@ -211,6 +240,7 @@ function wrap(ctx: RenderCtx, n: SceneNode, key: string, body: ReactNode) {
       data-id={ctx.interactive ? n.id : undefined}
       data-link={ctx.interactive && n.link ? '1' : undefined}
       data-mask={n.isMask ? '1' : undefined}
+      data-name={ctx.interactive ? n.name : undefined}
       opacity={opacity}
       filter={hasFx ? `url(#${fid})` : undefined}
       style={n.blendMode && n.blendMode !== 'normal' ? { mixBlendMode: n.blendMode as React.CSSProperties['mixBlendMode'] } : undefined}
@@ -260,7 +290,8 @@ export const NodeView = memo(function NodeView({ id }: { id: string }) {
   const n = useStore((s) => s.doc.nodes[id]);
   const hidden = useStore((s) => s.editingTextId === id);
   const zoom = useStore((s) => (s.doc.nodes[id]?.type === 'path' ? s.camera.zoom : 1));
-  const doc = useStore((s) => (s.doc.nodes[id]?.type === 'instance' ? s.doc : EMPTY));
+  // Instances and live boolean groups render from other layers, so they need the whole document.
+  const doc = useStore((s) => (s.doc.nodes[id]?.type === 'instance' || s.doc.nodes[id]?.booleanOp ? s.doc : EMPTY));
   const off = useStore((s) => s.dragPreview?.[id]);
   if (!n || !n.visible) return null;
   const ctx: RenderCtx = { doc, interactive: true, prefix: '', depth: 0, zoom, hideId: hidden ? id : null };

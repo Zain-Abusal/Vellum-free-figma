@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { extensions } from '../extensions/registry';
 import { runExtension } from '../extensions/api';
+import { installRemoteExtension, removeRemoteExtension, useRemoteExtensions } from '../extensions/remote';
 import type { Extension, PickItem, Values } from '../extensions/types';
 import { Window } from './Window';
 import { Icons } from './icons';
@@ -104,8 +105,11 @@ function Runner({ ext, onDone }: { ext: Extension; onDone: () => void }) {
 
 export function ExtensionsModal({ onClose, initial }: { onClose: () => void; initial?: string }) {
   const [q, setQ] = useState('');
-  const [active, setActive] = useState<Extension | null>(() => extensions.find((e) => e.id === initial) ?? null);
-  const list = extensions.filter((e) => (e.name + ' ' + e.description).toLowerCase().includes(q.toLowerCase()));
+  const remote = useRemoteExtensions();
+  const all = [...extensions, ...remote.flatMap((r) => (r.ext ? [r.ext] : []))];
+  const [active, setActive] = useState<Extension | null>(() => all.find((e) => e.id === initial) ?? null);
+  const [url, setUrl] = useState('');
+  const list = all.filter((e) => (e.name + ' ' + e.description).toLowerCase().includes(q.toLowerCase()));
   return (
     <Window id="extensions" width={380} title={active ? active.name : 'Extensions'} onClose={onClose}>
       {active ? (
@@ -141,7 +145,37 @@ export function ExtensionsModal({ onClose, initial }: { onClose: () => void; ini
             ))}
             {!list.length && <p className="muted">No extensions match.</p>}
           </div>
-          <p className="muted small">Build your own: copy src/extensions/_template — see docs/EXTENSIONS.md.</p>
+          <div className="remote-ext">
+            <span className="section-title">Install from URL (sandboxed)</span>
+            <div className="row">
+              <input className="text-input" placeholder="https://…/my-extension.js" value={url} onChange={(e) => setUrl(e.target.value)} />
+              <button
+                className="btn"
+                disabled={!url.trim()}
+                onClick={() => {
+                  try {
+                    installRemoteExtension(url.trim());
+                    setUrl('');
+                  } catch (e) {
+                    alert(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+              >
+                Install
+              </button>
+            </div>
+            {remote.map((r) => (
+              <div key={r.url} className="remote-row">
+                <span className={r.error ? 'error' : r.ext ? '' : 'muted'} title={r.url}>
+                  {r.ext ? `🌐 ${r.ext.name}` : r.error ? `⚠ ${r.error}` : 'Loading…'}
+                </span>
+                <button className="icon-btn" title={`Remove ${r.url}`} onClick={() => removeRemoteExtension(r.url)}>
+                  <Icons.close />
+                </button>
+              </div>
+            ))}
+            <p className="muted small">Third-party extensions run in an isolated sandbox and can only use the extension API. Try <code>{location.origin}/extensions/hello-remote.js</code>. Build your own: see docs/EXTENSIONS.md.</p>
+          </div>
         </>
       )}
     </Window>

@@ -330,8 +330,18 @@ function layoutAuto(d: Doc, f: SceneNode) {
   const al = f.autoLayout!;
   const hz = al.direction === 'horizontal';
   const P = al.padding;
-  const hugMain = al.hugMain !== false;
-  const hugCross = al.hugCross !== false;
+  let hugMain = al.hugMain !== false;
+  let hugCross = al.hugCross !== false;
+  // A frame that fills/stretches inside an auto-layout parent gets that axis from the parent:
+  // treat it as fixed here, or its content would align to its hug size (and fight the parent every pass).
+  const parent = f.parentId ? d.nodes[f.parentId] : null;
+  if (parent?.autoLayout) {
+    const pHz = parent.autoLayout.direction === 'horizontal';
+    const fixedW = (f.layoutFill && pHz) || (f.layoutStretch && !pHz);
+    const fixedH = (f.layoutFill && !pHz) || (f.layoutStretch && pHz);
+    if (hz ? fixedW : fixedH) hugMain = false;
+    if (hz ? fixedH : fixedW) hugCross = false;
+  }
   const kids = f.children.map((c) => d.nodes[c]).filter((k) => k && k.visible);
   const mainOf = (k: SceneNode) => (hz ? k.w : k.h);
   const crossOf = (k: SceneNode) => (hz ? k.h : k.w);
@@ -394,8 +404,49 @@ function layoutAuto(d: Doc, f: SceneNode) {
   }
 }
 
-/** Derived geometry: text auto-size, group bounds, auto layout. Runs after every edit. */
+/**
+ * Variables: write bound values into layers (so rendering, export and sync see plain values).
+ * The mode comes from the nearest ancestor frame with a `varModes` override, else the collection default.
+ */
+function resolveVariables(d: Doc) {
+  const cols = d.styles?.variables;
+  if (!cols?.length) return;
+  const byVar = new Map<string, { col: (typeof cols)[number]; v: (typeof cols)[number]['vars'][number] }>();
+  for (const col of cols) for (const v of col.vars) byVar.set(v.id, { col, v });
+  const modeFor = (n: SceneNode, colId: string, fallback: string) => {
+    let cur: SceneNode | undefined = n;
+    while (cur) {
+      const m = cur.varModes?.[colId];
+      if (m) return m;
+      cur = cur.parentId ? d.nodes[cur.parentId] : undefined;
+    }
+    return fallback;
+  };
+  for (const id in d.nodes) {
+    const n = d.nodes[id];
+    if (!n.vars) continue;
+    for (const [prop, varId] of Object.entries(n.vars)) {
+      const hit = varId && byVar.get(varId);
+      if (!hit) continue;
+      const value = hit.v.values[modeFor(n, hit.col.id, hit.col.defaultMode)] ?? hit.v.values[hit.col.defaultMode];
+      if (value === undefined) continue;
+      if (prop === 'gap' || prop === 'padding') {
+        if (n.autoLayout && n.autoLayout[prop] !== Number(value)) n.autoLayout[prop] = Number(value);
+      } else if (prop === 'fill') {
+        if (n.fill !== value) n.fill = String(value);
+        if (n.gradient) n.gradient = null;
+      } else if (prop === 'stroke') {
+        if (n.stroke !== value) n.stroke = String(value);
+      } else if (prop === 'radius' || prop === 'opacity') {
+        if (n[prop] !== Number(value)) n[prop] = Number(value);
+      }
+    }
+  }
+}
+
+/** Derived geometry: variables, text auto-size, group bounds, auto layout. Runs after every edit. */
 export function layoutAll(d: Doc) {
+  resolveVariables(d);
   const list: SceneNode[] = [];
   for (const id in d.nodes) {
     const n = d.nodes[id];

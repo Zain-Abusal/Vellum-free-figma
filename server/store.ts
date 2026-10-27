@@ -49,9 +49,17 @@ export interface RoomStore {
   create(room: string, editHash: string, name: string, pages: string, nodes: [string, string][], styles: string): Promise<void>;
   snapshot(room: string): Promise<Snapshot | null>;
   sync(a: SyncArgs): Promise<SyncResult>;
+  /** Which room an edit token (sha256) belongs to, so a project token alone can authenticate. */
+  roomForToken(tokenHash: string): Promise<string | null>;
+  /** True if `tokenHash` is the room's edit token. Backfills the token index for older rooms. */
+  tokenMatches(room: string, tokenHash: string): Promise<boolean>;
+  /** Replace the edit token (revokes old edit links and MCP connections). False if `oldHash` is wrong. */
+  rotateToken(room: string, oldHash: string, newHash: string): Promise<boolean>;
 }
 
 const TTL = 60 * 60 * 24 * 30; // rooms expire 30 days after the last edit
+const TOKEN_TTL = 60 * 60 * 24 * 365; // token → room index (rooms are checked for existence on lookup)
+const tokenKey = (hash: string) => `vellum:tok:${hash}`;
 const LOG_KEEP = 400;
 const PRESENCE_MS = 15000;
 
@@ -126,6 +134,7 @@ function redisStore(redis: Redis): RoomStore {
       const [meta, seq, nodesKey, pagesKey, log] = keys(room);
       const p = redis.pipeline();
       p.hset(meta, { name, edit: editHash, created: String(Date.now()), styles });
+      p.set(tokenKey(editHash), room, { ex: TOKEN_TTL });
       p.set(seq, '0');
       p.set(pagesKey, pages);
       // Keep each request well under Upstash's request-size limit.
@@ -143,6 +152,26 @@ function redisStore(redis: Redis): RoomStore {
       if (Object.keys(batch).length) p.hset(nodesKey, batch);
       for (const k of [meta, seq, nodesKey, pagesKey, log]) p.expire(k, TTL);
       await p.exec();
+    },
+    async roomForToken(hash) {
+      const room = (await redis.get(tokenKey(hash))) as string | null;
+      if (!room) return null;
+      return (await redis.hget(keys(room)[0], 'edit')) === hash ? room : null;
+    },
+    async rotateToken(room, oldHash, newHash) {
+      const meta = keys(room)[0];
+      if ((await redis.hget(meta, 'edit')) !== oldHash) return false;
+      const p = redis.pipeline();
+      p.hset(meta, { edit: newHash });
+      p.del(tokenKey(oldHash));
+      p.set(tokenKey(newHash), room, { ex: TOKEN_TTL });
+      await p.exec();
+      return true;
+    },
+    async tokenMatches(room, hash) {
+      const ok = (await redis.hget(keys(room)[0], 'edit')) === hash;
+      if (ok) await redis.set(tokenKey(hash), room, { ex: TOKEN_TTL });
+      return ok;
     },
     async snapshot(room) {
       const r = (await redis.eval(SNAPSHOT_LUA, keys(room), [])) as unknown[];
@@ -182,6 +211,19 @@ function memoryStore(): RoomStore {
     kind: 'memory',
     async create(room, editHash, name, pages, nodes, styles) {
       rooms.set(room, { meta: { name, edit: editHash, styles }, seq: 0, nodes: new Map(nodes), pages, log: [], presence: new Map() });
+    },
+    async roomForToken(hash) {
+      for (const [id, r] of rooms) if (r.meta.edit === hash) return id;
+      return null;
+    },
+    async tokenMatches(room, hash) {
+      return rooms.get(room)?.meta.edit === hash;
+    },
+    async rotateToken(room, oldHash, newHash) {
+      const r = rooms.get(room);
+      if (!r || r.meta.edit !== oldHash) return false;
+      r.meta.edit = newHash;
+      return true;
     },
     async snapshot(room) {
       const r = rooms.get(room);

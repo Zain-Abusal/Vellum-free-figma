@@ -140,6 +140,7 @@ export const Icons = {
   ),
   scale: I(<path d="M2.5 13.5l5-5M2.5 9.5v4h4M9 2.5h4.5V7M13.5 2.5L9 7" />),
   eyedropper: I(<path d="M10.5 2.75a1.75 1.75 0 012.5 2.5l-1.25 1.25.75.75-1 1-.75-.75-5 5H3.5v-2.25l5-5-.75-.75 1-1 .75.75z" />),
+  variable: I(<path d="M8 1.75l5.5 3.1v6.3L8 14.25l-5.5-3.1v-6.3zM8 8l5.5-3.15M8 8v6.25M8 8L2.5 4.85" />),
   textWidth: I(<path d="M2.5 8h11M4.5 6L2.5 8l2 2M11.5 6l2 2-2 2" />),
   textHeight: I(<path d="M8 2.5v11M6 4.5l2-2 2 2M6 11.5l2 2 2-2" />),
 };

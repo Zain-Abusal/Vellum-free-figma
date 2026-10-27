@@ -6,11 +6,13 @@ import { CURSOR } from './cursors';
 import { initTheme } from './theme';
 import { initUiPrefs } from './uiPrefs';
 import Tooltip from './components/Tooltip';
+import { initRemoteExtensions } from './extensions/remote';
 import './styles.css';
 
 document.documentElement.style.setProperty('--cursor', CURSOR.default);
 initTheme();
 initUiPrefs();
+initRemoteExtensions();
 
 function Routes() {
   const [hash, setHash] = useState(location.hash);

@@ -62,6 +62,7 @@ export interface State {
   /** Top-bar dialogs, openable from anywhere (command palette, menus). */
   dialog: 'versions' | 'shortcuts' | 'share' | null;
   prefsOpen: boolean;
+  variablesOpen: boolean;
   /** Layer currently being renamed inline in the layers panel (⌘R). */
   renamingId: string | null;
   /** Bumped to collapse every layer row (⌥L). */
@@ -121,6 +122,7 @@ export const useStore = create<State>((set, get) => {
     paletteOpen: false,
     dialog: null,
     prefsOpen: false,
+    variablesOpen: false,
     renamingId: null,
     collapseNonce: 0,
     set: (p) => set(p),

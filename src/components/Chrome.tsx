@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { addImageFiles, centerOn, getMe, setMe, startPresent, topFrames, zoomBy, zoomToFit, zoomToSelection } from '../actions';
 import { renderNode } from '../render';
 import { uid } from '../doc';
 import { download, exportLayers } from '../exporter';
-import { createRoom } from '../collab';
+import { createRoom, rotateRoomToken } from '../collab';
 import { deleteFile, putFile } from '../files';
 import type { Tool, Transition } from '../types';
 import { Icons, Logo } from './icons';
@@ -97,27 +97,47 @@ function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** Connect an AI agent over MCP: it sees collaborators live and edits the file with a 🤖 cursor. */
+/**
+ * Connect an AI agent over MCP. Auth is the project's edit token, sent as a Bearer header,
+ * so the URL itself contains no secret and the token alone identifies the file.
+ */
 function McpConnect({ roomId, token }: { roomId: string; token?: string }) {
   const [agent, setAgent] = useState('Claude');
-  const url = `${location.origin}/api/mcp?room=${roomId}${token ? `&token=${token}` : ''}&name=${encodeURIComponent(agent || 'AI agent')}`;
-  const cli = `claude mcp add --transport http vellum "${url}"`;
-  const json = JSON.stringify({ mcpServers: { vellum: { type: 'http', url } } }, null, 2);
+  const [reveal, setReveal] = useState(false);
+  const name = encodeURIComponent(agent || 'AI agent');
+  const url = token ? `${location.origin}/api/mcp?name=${name}` : `${location.origin}/api/mcp?room=${roomId}&name=${name}`;
+  const header = token ? `Authorization: Bearer ${token}` : '';
+  const cli = token ? `claude mcp add --transport http vellum "${url}" --header "${header}"` : `claude mcp add --transport http vellum "${url}"`;
+  const json = JSON.stringify({ mcpServers: { vellum: { type: 'http', url, ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}) } } }, null, 2);
   return (
     <div className="mcp-box">
       <strong>Connect an AI agent (MCP)</strong>
       <p className="muted">
-        Give Claude or any MCP client live access to this file. It can see who is online and what they selected, read and render the design, and edit it while you watch its 🤖 cursor.
-        {!token && ' This is a view-only connection (no edits).'}
+        Give Claude or any MCP client live access to this file. It sees who is online and what they selected, reads and renders the design, and edits it while you watch its 🤖 cursor.
+        {!token && ' You opened a view-only link, so the agent can look but not edit.'}
       </p>
       <label className="field">
         <span className="muted">Agent name (shown on its cursor)</span>
         <input className="text-input" value={agent} onChange={(e) => setAgent(e.target.value.slice(0, 30))} />
       </label>
       <CopyField label="MCP server URL" value={url} />
-      <CopyField label="Claude Code" value={cli} />
+      {token && (
+        <div className="copy-field">
+          <span className="muted">Project token (send as “Authorization: Bearer …”, keep it secret, it grants edit access)</span>
+          <div className="row">
+            <input className="text-input mono" readOnly value={reveal ? token : '•'.repeat(24)} onFocus={(e) => reveal && e.target.select()} />
+            <button className="btn" onClick={() => setReveal(!reveal)}>
+              {reveal ? 'Hide' : 'Show'}
+            </button>
+            <button className="btn" onClick={() => navigator.clipboard.writeText(token)}>
+              Copy
+            </button>
+          </div>
+        </div>
+      )}
+      <CopyField label="Claude Code (includes the token)" value={cli} />
       <details>
-        <summary className="muted">Other clients (JSON config)</summary>
+        <summary className="muted">Other clients (JSON config, includes the token)</summary>
         <pre className="code">{json}</pre>
       </details>
     </div>
@@ -187,6 +207,24 @@ function ShareModal({ onClose }: { onClose: () => void }) {
       {collab ? (
         <>
           {collab.token && <CopyField label="Invite to edit" value={`${base}#/room/${collab.roomId}/${collab.token}`} />}
+          {collab.token && (
+            <button
+              className="link-btn danger"
+              onClick={async () => {
+                if (!confirm('Reset the edit link? Everyone using the current edit link (and connected AI agents) becomes view-only until you share the new link.')) return;
+                try {
+                  const token = await rotateRoomToken(collab.roomId, collab.token!);
+                  const s = useStore.getState();
+                  await putFile({ id: 'room:' + collab.roomId, name: s.fileName, updated: Date.now(), doc: s.doc, versions: s.versions, room: { id: collab.roomId, token } });
+                  location.hash = `#/room/${collab.roomId}/${token}`;
+                } catch (e) {
+                  alert(e instanceof Error ? e.message : String(e));
+                }
+              }}
+            >
+              Reset edit link (revoke access)
+            </button>
+          )}
           <CopyField label="Invite to view" value={`${base}#/room/${collab.roomId}`} />
           <p className="muted">Anyone with a link can open this file. Everyone with the edit link sees changes and cursors live, from anywhere.</p>
           <McpConnect roomId={collab.roomId} token={collab.token} />
@@ -344,6 +382,7 @@ export function TopBar() {
               {item('Export frames to PDF', () => exportFrames('pdf'))}
               {item('Export frames as PNG (ZIP)', () => exportFrames('png'))}
               {item('Version history', () => setModal('versions'))}
+              {item('Variables…', () => set({ variablesOpen: true }))}
               <div className="menu-sep" />
               {item('Rulers', () => set({ showRulers: !showRulers }), '⇧R', showRulers)}
               {item('Outline mode', () => set({ outlineMode: !outlineMode }), `${MOD}Y`, outlineMode)}
@@ -574,26 +613,57 @@ export function Present() {
   const n = frameId ? doc.nodes[frameId] : null;
   const [history, setHistory] = useState<string[]>([]);
   const [anim, setAnim] = useState<{ t: Transition; back: boolean }>({ t: 'instant', back: false });
+  const [overlay, setOverlay] = useState<string | null>(null);
   const [hotspots, setHotspots] = useState(false);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const smartFrom = useRef<Map<string, DOMRect> | null>(null);
 
   const go = (id: string, t: Transition = 'dissolve', back = false) => {
     const s = useStore.getState();
+    setOverlay(null);
     if (!back && s.presenting) setHistory((h) => [...h, s.presenting!]);
+    if (t === 'smart' && svgRef.current) {
+      // Remember where every named layer is, so matching layers can glide to their new place.
+      const m = new Map<string, DOMRect>();
+      svgRef.current.querySelectorAll('[data-name]').forEach((el) => {
+        const k = el.getAttribute('data-name')!;
+        if (!m.has(k)) m.set(k, el.getBoundingClientRect());
+      });
+      smartFrom.current = m;
+    }
     setAnim({ t, back });
     s.set({ presenting: id });
   };
   const goBack = () => {
+    if (overlay) return setOverlay(null);
     const prev = history[history.length - 1];
     if (!prev) return;
     setHistory((h) => h.slice(0, -1));
     go(prev, anim.t, true);
   };
 
+  // Smart animate: FLIP matching layers from the old frame's positions.
+  useLayoutEffect(() => {
+    const from = smartFrom.current;
+    smartFrom.current = null;
+    const svg = svgRef.current;
+    if (!from || !svg || !n) return;
+    const k = svg.getBoundingClientRect().width / n.w || 1;
+    svg.querySelectorAll<SVGGElement>('[data-name]').forEach((el) => {
+      const a = from.get(el.getAttribute('data-name')!);
+      if (!a) return el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: 'ease' });
+      const b = el.getBoundingClientRect();
+      const dx = (a.left - b.left) / k;
+      const dy = (a.top - b.top) / k;
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }], { duration: 400, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    });
+  }, [n?.id]);
+
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       const s = useStore.getState();
       const i = frames.findIndex((f) => f.id === s.presenting);
-      if (e.key === 'Escape') s.set({ presenting: null });
+      if (e.key === 'Escape') overlay ? setOverlay(null) : s.set({ presenting: null });
       if (e.key === 'ArrowRight' && i < frames.length - 1) go(frames[i + 1].id, 'slide-left');
       if (e.key === 'ArrowLeft' && i > 0) go(frames[i - 1].id, 'slide-right');
       if (e.key === 'Backspace') goBack();
@@ -608,19 +678,23 @@ export function Present() {
     while (id) {
       const node = doc.nodes[id];
       if (node?.link === '__back') return goBack();
-      if (node?.link && doc.nodes[node.link]) return go(node.link, node.linkTransition ?? 'dissolve');
+      if (node?.link && doc.nodes[node.link]) {
+        if (node.linkAction === 'overlay') return setOverlay(node.link);
+        return go(node.link, node.linkTransition ?? 'dissolve');
+      }
       id = node?.parentId ?? null;
     }
     // Missed: briefly highlight what's clickable.
     setHotspots(true);
     setTimeout(() => setHotspots(false), 700);
   };
-  const cls = anim.back && anim.t.startsWith('slide') ? { 'slide-left': 'slide-right', 'slide-right': 'slide-left', 'slide-up': 'slide-down', 'slide-down': 'slide-up' }[anim.t as 'slide-left'] : anim.t;
+  const cls = anim.t === 'smart' ? 'instant' : anim.back && anim.t.startsWith('slide') ? { 'slide-left': 'slide-right', 'slide-right': 'slide-left', 'slide-up': 'slide-down', 'slide-down': 'slide-up' }[anim.t as 'slide-left'] : anim.t;
+  const ov = overlay ? doc.nodes[overlay] : null;
   return (
     <div className="present">
       <div className="present-bar">
         <span className="row tight">
-          {history.length > 0 && (
+          {(history.length > 0 || overlay) && (
             <button className="btn small" onClick={goBack}>
               ← Back
             </button>
@@ -635,9 +709,16 @@ export function Present() {
         </button>
       </div>
       <div className="present-stage">
-        <svg key={n.id} className={`present-frame t-${cls}${hotspots ? ' show-hotspots' : ''}`} viewBox={`${n.x} ${n.y} ${n.w} ${n.h}`} preserveAspectRatio="xMidYMid meet" onClick={click}>
+        <svg ref={svgRef} key={n.id} className={`present-frame t-${cls}${hotspots ? ' show-hotspots' : ''}`} viewBox={`${n.x} ${n.y} ${n.w} ${n.h}`} preserveAspectRatio="xMidYMid meet" onClick={click}>
           {renderNode({ doc, interactive: true, prefix: 'p-', depth: 0, zoom: 1 }, n.id)}
         </svg>
+        {ov && (
+          <div className="present-overlay" onClick={(e) => e.target === e.currentTarget && setOverlay(null)}>
+            <svg className="overlay-frame" viewBox={`${ov.x} ${ov.y} ${ov.w} ${ov.h}`} style={{ width: `min(${ov.w}px, 90vw)`, aspectRatio: `${ov.w} / ${ov.h}` }} onClick={click}>
+              {renderNode({ doc, interactive: true, prefix: 'o-', depth: 0, zoom: 1 }, ov.id)}
+            </svg>
+          </div>
+        )}
       </div>
     </div>
   );

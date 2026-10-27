@@ -6,6 +6,7 @@ import { clearTextCache } from '../doc';
 import { fetchRoom, startSync } from '../collab';
 import {
   addImageFiles,
+  importSvgText,
   align,
   autoLayoutSelection,
   copyProperties,
@@ -37,12 +38,14 @@ import {
   zoomToSelection,
 } from '../actions';
 import type { Tool } from '../types';
+import { looksLikeSvg } from '../svgImport';
 import { lastRun, runExtension } from '../extensions/api';
 import { getUiPrefs } from '../uiPrefs';
 import CommandPalette from './CommandPalette';
 import Preferences from './Preferences';
 import { ExtensionsModal } from './Extensions';
 import EmptyHint from './EmptyHint';
+import { VariablesWindow } from './panels/VariablesUI';
 import Canvas from './Canvas';
 import LeftPanel from './LeftPanel';
 import RightPanel from './RightPanel';
@@ -137,7 +140,9 @@ function onPaste(e: ClipboardEvent) {
   if (t?.closest?.('input, textarea')) return;
   const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
   e.preventDefault();
+  const text = e.clipboardData?.getData('text/plain') ?? '';
   if (files.length) addImageFiles(files);
+  else if (looksLikeSvg(text)) importSvgText(text);
   else paste();
 }
 
@@ -208,6 +213,7 @@ export default function Editor({ fileId, room }: { fileId: string; room?: { id: 
   const toast = useStore((s) => s.toast);
   const paletteOpen = useStore((s) => s.paletteOpen);
   const prefsOpen = useStore((s) => s.prefsOpen);
+  const variablesOpen = useStore((s) => s.variablesOpen);
   const extOpen = useStore((s) => s.extensionsOpen);
   const [widths, setWidths] = useState(loadWidths);
 
@@ -345,6 +351,7 @@ export default function Editor({ fileId, room }: { fileId: string; room?: { id: 
       {presenting && <Present />}
       {paletteOpen && <CommandPalette />}
       {prefsOpen && <Preferences />}
+      {variablesOpen && <VariablesWindow />}
       {extOpen && <ExtensionsModal key={String(extOpen)} initial={typeof extOpen === 'string' ? extOpen : undefined} onClose={() => useStore.getState().set({ extensionsOpen: false })} />}
       {toast && (
         <div className="toast" key={toast}>
