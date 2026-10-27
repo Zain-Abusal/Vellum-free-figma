@@ -277,51 +277,120 @@ const widthCache = new Map<string, number>();
 /** Drop cached text widths (call when web fonts finish loading). */
 export const clearTextCache = () => widthCache.clear();
 
-function measureText(n: SceneNode) {
-  if (typeof document === 'undefined') return;
+const fontOf = (n: SceneNode) => `${n.fontWeight ?? 400} ${n.fontSize ?? 16}px "${n.fontFamily ?? 'Inter'}", system-ui, sans-serif`;
+
+function lineWidth(font: string, line: string, ls: number) {
+  if (typeof document === 'undefined') return line.length * 8;
   measureCtx ??= document.createElement('canvas').getContext('2d');
-  if (!measureCtx) return;
-  const size = n.fontSize ?? 16;
-  const font = `${n.fontWeight ?? 400} ${size}px "${n.fontFamily ?? 'Inter'}", system-ui, sans-serif`;
-  const ls = n.letterSpacing ?? 0;
-  const lines = (n.text ?? '').split('\n');
-  let w = 1;
-  for (const line of lines) {
-    const key = font + '|' + line;
-    let lw = widthCache.get(key);
-    if (lw === undefined) {
-      measureCtx.font = font;
-      lw = measureCtx.measureText(line).width;
-      if (widthCache.size > 5000) widthCache.clear();
-      widthCache.set(key, lw);
-    }
-    w = Math.max(w, lw + ls * line.length);
+  if (!measureCtx) return line.length * 8;
+  const key = font + '|' + line;
+  let w = widthCache.get(key);
+  if (w === undefined) {
+    measureCtx.font = font;
+    w = measureCtx.measureText(line).width;
+    if (widthCache.size > 5000) widthCache.clear();
+    widthCache.set(key, w);
   }
-  n.w = Math.ceil(w);
-  n.h = Math.round(lines.length * size * (n.lineHeight ?? 1.2) * 100) / 100;
+  return w + ls * line.length;
+}
+
+/** Visual lines of a text layer: hard breaks, plus word wrapping in fixed-width mode. */
+export function textLines(n: SceneNode): string[] {
+  const paras = (n.text ?? '').split('\n');
+  if (n.textAutoResize !== 'height') return paras;
+  const font = fontOf(n);
+  const ls = n.letterSpacing ?? 0;
+  const out: string[] = [];
+  for (const p of paras) {
+    const words = p.split(' ');
+    let line = '';
+    for (const w of words) {
+      const next = line ? line + ' ' + w : w;
+      if (line && lineWidth(font, next, ls) > n.w) {
+        out.push(line);
+        line = w;
+      } else line = next;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+function measureText(n: SceneNode) {
+  const lines = textLines(n);
+  if (n.textAutoResize !== 'height') {
+    const font = fontOf(n);
+    const ls = n.letterSpacing ?? 0;
+    n.w = Math.ceil(Math.max(1, ...lines.map((l) => lineWidth(font, l, ls))));
+  }
+  n.h = Math.round(lines.length * (n.fontSize ?? 16) * (n.lineHeight ?? 1.2) * 100) / 100;
 }
 
 function layoutAuto(d: Doc, f: SceneNode) {
   const al = f.autoLayout!;
   const hz = al.direction === 'horizontal';
+  const P = al.padding;
+  const hugMain = al.hugMain !== false;
+  const hugCross = al.hugCross !== false;
   const kids = f.children.map((c) => d.nodes[c]).filter((k) => k && k.visible);
-  const cross = Math.max(0, ...kids.map((k) => (hz ? k.h : k.w)));
-  const t = al.align === 'center' ? 0.5 : al.align === 'end' ? 1 : 0;
-  let cur = al.padding;
-  for (const k of kids) {
-    const tx = hz ? f.x + cur : f.x + al.padding + (cross - k.w) * t;
-    const ty = hz ? f.y + al.padding + (cross - k.h) * t : f.y + cur;
-    moveDeep(d, k.id, tx - k.x, ty - k.y);
-    cur += (hz ? k.w : k.h) + al.gap;
+  const mainOf = (k: SceneNode) => (hz ? k.w : k.h);
+  const crossOf = (k: SceneNode) => (hz ? k.h : k.w);
+  const setSizeAxis = (k: SceneNode, main: number | null, cross: number | null) => {
+    const w = hz ? (main ?? k.w) : (cross ?? k.w);
+    const h = hz ? (cross ?? k.h) : (main ?? k.h);
+    if (w === k.w && h === k.h) return;
+    if (k.type === 'text') {
+      // Text that fills/stretches horizontally becomes fixed width and wraps.
+      if (w !== k.w) {
+        k.textAutoResize = 'height';
+        k.w = Math.max(1, w);
+        measureText(k);
+      }
+      return;
+    }
+    resizeTo(d, k.id, { x: k.x, y: k.y, w: Math.max(0, w), h: Math.max(0, h) });
+  };
+
+  // Cross axis: hug the largest non-stretch child, or use the fixed size.
+  const crossInner = hugCross ? Math.max(0, ...kids.filter((k) => !k.layoutStretch).map(crossOf)) : Math.max(0, (hz ? f.h : f.w) - P * 2);
+  for (const k of kids) if (k.layoutStretch) setSizeAxis(k, null, crossInner);
+
+  // Main axis: "fill" children share the leftover space when the frame has a fixed size.
+  const fills = kids.filter((k) => k.layoutFill);
+  const innerMain = (hz ? f.w : f.h) - P * 2;
+  if (!hugMain && fills.length) {
+    const fixed = kids.filter((k) => !k.layoutFill).reduce((t, k) => t + mainOf(k), 0);
+    const each = Math.max(0, (innerMain - fixed - al.gap * Math.max(0, kids.length - 1)) / fills.length);
+    for (const k of fills) setSizeAxis(k, each, null);
   }
-  const main = kids.length ? cur - al.gap + al.padding : al.padding * 2;
-  const crossSize = cross + al.padding * 2;
-  if (hz) {
-    f.w = main;
-    f.h = crossSize;
-  } else {
-    f.w = crossSize;
-    f.h = main;
+
+  const sizes = kids.reduce((t, k) => t + mainOf(k), 0);
+  let gap = al.gap;
+  let cur = P;
+  if (!hugMain) {
+    if (al.justify === 'between' && kids.length > 1) gap = (innerMain - sizes) / (kids.length - 1);
+    else {
+      const total = sizes + gap * Math.max(0, kids.length - 1);
+      const t = al.justify === 'center' ? 0.5 : al.justify === 'end' ? 1 : 0;
+      cur = P + (innerMain - total) * t;
+    }
+  }
+  const t = al.align === 'center' ? 0.5 : al.align === 'end' ? 1 : 0;
+  for (const k of kids) {
+    const off = P + (crossInner - crossOf(k)) * t;
+    const tx = hz ? f.x + cur : f.x + off;
+    const ty = hz ? f.y + off : f.y + cur;
+    moveDeep(d, k.id, tx - k.x, ty - k.y);
+    cur += mainOf(k) + gap;
+  }
+  if (hugMain) {
+    const main = kids.length ? cur - gap + P : P * 2;
+    if (hz) f.w = main;
+    else f.h = main;
+  }
+  if (hugCross) {
+    if (hz) f.h = crossInner + P * 2;
+    else f.w = crossInner + P * 2;
   }
 }
 
@@ -341,7 +410,8 @@ export function layoutAll(d: Doc) {
         removeNode(d, n.id);
         continue;
       }
-      Object.assign(n, bbox(n.children.map((c) => d.nodes[c])));
+      // Mask groups take the mask's bounds.
+      Object.assign(n, bbox((n.masked ? n.children.slice(0, 1) : n.children).map((c) => d.nodes[c])));
     } else layoutAuto(d, n);
   }
 }

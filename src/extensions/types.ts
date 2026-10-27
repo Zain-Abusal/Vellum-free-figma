@@ -57,6 +57,8 @@ export interface ExtensionAPI {
   update(id: string, patch: Partial<SceneNode>): void;
   /** Delete a layer and its children. */
   remove(id: string): void;
+  /** Copy a layer (and its children) next to the original, offset by dx/dy. Returns the new id. */
+  duplicate(id: string, dx?: number, dy?: number): string | null;
   /** Wrap layers in a group. Returns the group id. */
   group(ids: string[]): string | null;
   /** Insert an image from a URL or data URL. Returns the new id. */
@@ -69,6 +71,8 @@ export interface ExtensionAPI {
   zoomTo(ids: string[]): void;
   /** Show a short message. */
   notify(message: string): void;
+  /** Save a file to the user's computer. */
+  download(filename: string, content: string | Blob, mime?: string): void;
 }
 
 export const defineExtension = (e: Extension) => e;

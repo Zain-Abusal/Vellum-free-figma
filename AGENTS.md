@@ -2,7 +2,9 @@
 
 Read this before changing the code. **Update the progress tracker and changelog at the bottom whenever you finish a change.**
 
-Vellum is an original, free, Figma-style design editor. The UI, layout and shortcuts deliberately mirror Figma (UI3) so Figma users feel at home, but **never copy Figma's code, name, logo or other assets**.
+Vellum is an original, free, Figma-style design editor. Layout, workflow and shortcuts deliberately match Figma so Figma users feel at home, but **never copy Figma's code, name, logo or other assets**.
+
+**Own identity, kept on purpose:** violet accent `--accent` (#5b4ef0) and teal components `--component`, the Geist UI font, floating rounded "island" panels on `--app-bg`, round selection handles and pill size labels, the dotted canvas (`--canvas-dot`), and the gradient V logo. Keep new UI consistent with these; don't drift back to Figma's blue/purple or square handles.
 
 ## Commands
 
@@ -25,16 +27,20 @@ src/
   actions.ts      Every editor command (group, align, boolean, comments, camera animation…)
   render.tsx      SVG renderer: renderNode() (static: export/present) and NodeView (memoized live canvas)
   exporter.tsx    SVG/PNG/JPG/PDF/ZIP export, font embedding, clipboard, dev-mode CSS
+  codegen.ts      Inspect: Tailwind classes and React (inline styles or Tailwind) code
+  commands.ts     Quick actions registry (⌘/)
+  uiPrefs.ts      Per-browser UI preferences (toolbar dock, contrast, inputs, dots)
   files.ts        IndexedDB + synchronous localStorage mirror, per-file prefs
   collab.ts       Live collaboration client (diff → ops → /api/sync polling)
   cursors.ts      Custom Figma-style cursors (SVG data URLs)
   zip.ts          Tiny store-only ZIP writer
   extensions/     Plugin system: types.ts (API), api.ts (implementation), registry.ts (auto-discovery), one folder per extension
   components/     Canvas, panels, toolbar/top bar (Chrome.tsx), overlays (rulers, measure, comments), Home, Editor
-server/           Collaboration backend: store.ts (Upstash Redis Lua + in-memory fallback), handlers.ts (HTTP)
+server/           Backend: store.ts (Upstash Redis Lua + in-memory fallback), handlers.ts (HTTP), mcp.ts (MCP server for AI agents)
 api/              Vercel Edge Function entry points (thin wrappers around server/handlers.ts)
 scripts/e2e.mjs   End-to-end tests
 docs/EXTENSIONS.md  How to write extensions
+docs/MCP.md         Connecting AI agents over MCP
 ```
 
 ### Invariants (don't break these)
@@ -62,6 +68,26 @@ docs/EXTENSIONS.md  How to write extensions
 - Links: `#/room/<id>/<token>` = edit, `#/room/<id>` = view-only. The server stores only `sha256(token)`. Rooms expire 30 days after the last edit.
 - Free-tier budget: one Redis command per sync. See the README for numbers.
 
+## User research → features
+
+Vellum's roadmap is driven by what Figma users complain about. When adding features, check this list.
+
+| Feedback (source) | Vellum's answer |
+| --- | --- |
+| UI3's floating bottom toolbar covers work; nobody asked for it (Figma forum) | Preferences → Toolbar: **Floating** or **Docked in the top bar** |
+| Plugins buried in sub-menus; hard to find properties (Figma forum) | **Quick actions** (`⌘/` / `⌘K`): every command, extension, page, frame, component, style and layer; toolbar **Actions** + **Extensions** buttons |
+| Low contrast, gray input fields, hard-to-read icons (Figma forum) | Preferences → **High contrast** and **Outlined inputs**; redrawn 16px icon set; tooltips with shortcut chips |
+| Inserting components requires search; no list view (Figma forum) | Assets panel **list / grid** toggle, click or drag to insert, components in Quick actions |
+| No offline access (G2, Capterra) | **PWA**: installable, app shell + fonts cached by `public/sw.js`, files stored locally |
+| Steep learning curve (G2, Capterra) | Empty-page **Start designing** card, tooltips everywhere, shortcut sheet, Quick actions |
+| Layers get confusing on big projects (G2) | Layer search, **Tab/⇧Tab** sibling navigation, **N/⇧N** frame navigation, **⌘R** rename, **⌥L** collapse all, auto-scroll to selection, **Sections** |
+| Text styles limited (Capterra) | Linked **color & text styles** (edit once, update everywhere), synced in live files |
+| Auto layout for sections (Figma forum) | Sections are frames, so auto layout and constraints work on them |
+| Radial repeat only in Figma Draw (Figma forum) | **Radial Repeat** extension |
+| Handoff needs plugins (common) | Inspect generates **Tailwind** and **React**; **Export to HTML** extension |
+| AI help inside the design tool (trend) | **MCP server**: any MCP agent (e.g. Claude) joins the live file and edits with a visible cursor |
+| Cost (G2, Capterra) | Everything is free |
+
 ## Progress tracker
 
 Legend: ✅ done · 🟡 partial · ⬜ not started
@@ -77,6 +103,15 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ✅ Light / dark / system theme (tokens in `styles.css`, `src/theme.ts`; set before first paint in `index.html`)
 - ✅ Draggable floating windows (`components/Window.tsx`, portaled to `<body>`, positions remembered), resizable side panels
 - ✅ UI motion: menus, windows, toasts, tabs, buttons (disabled under `prefers-reduced-motion`)
+- ✅ Quick actions command palette (`components/CommandPalette.tsx`, `commands.ts`): fuzzy search, recents
+- ✅ Global tooltips with shortcut chips (`components/Tooltip.tsx` takes over every `title`)
+- ✅ Preferences (`⌘,`): theme, toolbar floating/docked, outlined inputs, high contrast, nudge, tips (`uiPrefs.ts`)
+- ✅ Keyboard navigation: Tab/⇧Tab siblings, N/⇧N frames, ⌘R rename, ⌥L collapse, auto-scroll layers
+- ✅ Sections (⇧S), empty-page start card, PWA offline support
+- ✅ Frame presets (phone, tablet, desktop, watch, social, paper, slides) + resize-to-preset
+- ✅ Auto layout v2: space-between / packed alignment, hug or fixed per axis, children fill / stretch
+- ✅ Per-corner radius, dashed strokes, inner shadow, eyedropper (I), scale tool (K)
+- ✅ Inspect: CSS, Tailwind, React, React + Tailwind
 - ✅ Custom Figma-style cursors (arrow, crosshair, pen, text, hand, rotate, resize at any angle, comment, duplicate)
 - ✅ Layers panel (tree, drag to reorder/nest, rename, hide, lock, search), pages
 - ✅ Components & instances, Assets panel, detach, go to main
@@ -87,13 +122,18 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ✅ Flip H/V, align, distribute, copy/paste properties, document colors
 - ✅ Prototype links + Present mode, Inspect (CSS)
 - ✅ Comments (pins, threads, resolve) stored in the file
-- ⬜ Bezier curves in the pen tool / curve handles in vector edit
+- ✅ Bezier pen (drag to pull handles), curve handles in vector edit (Alt breaks symmetry), double-click a point to toggle smooth/sharp
 - ⬜ Live (non-destructive) boolean groups
-- ⬜ Instance overrides (text/fill per instance), component variants/properties
-- ⬜ Fixed-width (wrapping) text, rich text spans
-- ⬜ Color styles / variables, text styles
-- ⬜ Layout grids, image crop mode, masks
-- ⬜ Prototype transitions (smart animate), scroll/overflow behaviour
+- ✅ Instance overrides: per-instance text and layer visibility (Design → Instance properties), reset
+- ⬜ Component variants / typed component properties
+- ✅ Fixed-width wrapping text (auto width / auto height; side handles set width)
+- ⬜ Rich text spans (mixed styles in one text layer)
+- ✅ Linked color & text styles (Assets → Styles, Design panel pickers)
+- ⬜ Variables / modes
+- ✅ Layout grids (columns / rows / grid, ⌃⇧4), masks (⌥⌘M, alpha mask groups)
+- ⬜ Image crop mode
+- ✅ Prototype transitions (dissolve, slide ×4), Back action, hotspot flash on misclick
+- ⬜ Smart animate, overlays, scroll/overflow behaviour
 
 ### Files, storage, export
 - ✅ IndexedDB storage + synchronous localStorage mirror (flush on tab close), quota eviction
@@ -106,6 +146,7 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ⬜ SVG import as editable vectors
 
 ### Collaboration (Vercel + Upstash Redis)
+- ✅ **MCP server** for AI agents (`/api/mcp`): live view of collaborators, read/render/edit tools, 🤖 presence cursor
 - ✅ Rooms, edit and view-only invite links, live sync, cursors, selections, avatars, jump-to-person
 - ✅ Local dev without Redis (in-memory store)
 - 🟡 Undo in shared files is local-only and rebased over remote ops (not per-user operational undo)
@@ -115,10 +156,14 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 
 ### Extensions
 - ✅ Extension API, auto-discovery, forms, search pickers, one-undo-step runs, run-last (⌘⌥P)
-- ✅ Built-in: Lorem Ipsum, Placeholder Images, Icons, Color Palette, Contrast Checker, Batch Rename, Find & Replace, Arrange in Grid, Clean Document, Random Data, Bar Chart
+- ✅ Built-in: QR Code, Avatars, Blob Generator, Table, Shadow Presets, Emoji, Export to HTML, Radial Repeat, Lorem Ipsum, Placeholder Images, Icons, Color Palette, Contrast Checker, Batch Rename, Find & Replace, Arrange in Grid, Clean Document, Random Data, Bar Chart
 - ⬜ Load third-party extensions at runtime (would need sandboxing in an iframe)
 
 ## Changelog
+
+- **2026-10-27**: v0.5. Figma parity: bezier pen + curve editing, auto layout v2, frame presets, per-corner radius, dashed strokes, inner shadow, masks, layout grids, instance overrides, eyedropper, scale tool, prototype transitions/back, Tailwind/React codegen. Own identity (violet/teal, Geist, island panels, round handles, dotted canvas, new logo). 7 new extensions (19 total). MCP server so AI agents can join live files.
+
+- **2026-10-27**: v0.4. Driven by Figma user research (forum, G2, Capterra): quick actions palette, tooltips with shortcuts, preferences (docked toolbar, high contrast, outlined inputs), keyboard navigation, sections, wrapping text, linked color/text styles (synced live), assets list view, redrawn icon set, empty-page start card, PWA offline mode, Radial Repeat extension, extension `duplicate()` API.
 
 - **2026-10-27**: v0.3. Dark mode (system/light/dark), draggable floating windows with remembered positions (Extensions, Versions, Shortcuts; Share is modal), resizable side panels, UI animations and polish (focus rings, scrollbars, theme cross-fade).
 

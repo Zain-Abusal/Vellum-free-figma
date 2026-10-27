@@ -9,7 +9,7 @@ export default defineExtension({
   inputs: [
     { key: 'values', label: 'Values', type: 'text', default: '12, 19, 7, 15, 24, 18' },
     { key: 'labels', label: 'Labels (optional)', type: 'text', default: 'Mon, Tue, Wed, Thu, Fri, Sat' },
-    { key: 'color', label: 'Bar color', type: 'color', default: '#0d99ff' },
+    { key: 'color', label: 'Bar color', type: 'color', default: '#5b4ef0' },
     { key: 'height', label: 'Chart height', type: 'number', default: 200, min: 40 },
   ],
   run(api, v) {

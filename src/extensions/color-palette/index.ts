@@ -31,7 +31,7 @@ export default defineExtension({
   description: 'Generate a palette (shades, analogous, complementary, triadic) from a base color.',
   icon: '🎨',
   inputs: [
-    { key: 'base', label: 'Base color', type: 'color', default: '#0d99ff' },
+    { key: 'base', label: 'Base color', type: 'color', default: '#5b4ef0' },
     {
       key: 'scheme',
       label: 'Scheme',
@@ -47,7 +47,7 @@ export default defineExtension({
     },
   ],
   run(api, v) {
-    const [h, s, l] = hexToHsl(String(v.base ?? '#0d99ff'));
+    const [h, s, l] = hexToHsl(String(v.base ?? '#5b4ef0'));
     let colors: string[];
     switch (v.scheme) {
       case 'analogous':

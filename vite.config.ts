@@ -13,7 +13,7 @@ function localApi(): Plugin {
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
     const request = new Request('http://localhost' + req.url, {
       method: req.method,
-      headers: { 'content-type': String(req.headers['content-type'] ?? 'application/json') },
+      headers: Object.fromEntries(Object.entries(req.headers).filter(([k, v]) => typeof v === 'string' && ['content-type', 'mcp-session-id', 'mcp-protocol-version', 'accept'].includes(k)) as [string, string][]),
       body: hasBody ? Buffer.concat(chunks) : undefined,
     });
     const r = await (await load())(request);

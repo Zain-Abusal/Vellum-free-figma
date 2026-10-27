@@ -1,4 +1,5 @@
 import { getStore } from './store';
+import { handleMcp } from './mcp';
 
 /*
  * HTTP API for live collaboration. Runs as Vercel Edge Functions (see /api) and,
@@ -7,10 +8,11 @@ import { getStore } from './store';
  *   POST /api/rooms   { name, doc }                                    -> { id, token }
  *   GET  /api/room?id=                                                 -> { seq, name, pages, nodes }
  *   POST /api/sync    { room, clientId, since, token?, ops?, presence } -> { seq, pushed, canEdit, reset, entries, peers }
+ *   POST /api/mcp?room=&token=&name=  (MCP, Streamable HTTP; see docs/MCP.md)
  *   GET  /api/health                                                   -> { ok, storage }
  */
 
-type Op = { t: 'node'; node: { id: string } } | { t: 'del'; id: string } | { t: 'pages'; pages: unknown } | { t: 'name'; name: string };
+type Op = { t: 'node'; node: { id: string } } | { t: 'del'; id: string } | { t: 'pages'; pages: unknown } | { t: 'name'; name: string } | { t: 'styles'; styles: unknown };
 
 const ID = /^[A-Za-z0-9]{6,40}$/;
 const MAX_BODY = 4_000_000;
@@ -40,12 +42,12 @@ async function body<T>(req: Request): Promise<T | null> {
 }
 
 async function createRoom(req: Request) {
-  const b = await body<{ name?: string; doc?: { pages?: unknown[]; nodes?: Record<string, { id: string }> } }>(req);
+  const b = await body<{ name?: string; doc?: { pages?: unknown[]; nodes?: Record<string, { id: string }>; styles?: unknown } }>(req);
   if (!b?.doc || !Array.isArray(b.doc.pages) || typeof b.doc.nodes !== 'object') return json({ error: 'Invalid document (or larger than 4 MB).' }, 400);
   const id = randomId(12);
   const token = randomId(24);
   const nodes = Object.values(b.doc.nodes).map((n) => [n.id, JSON.stringify(n)] as [string, string]);
-  await getStore().create(id, await sha256(token), String(b.name ?? 'Untitled').slice(0, 200), JSON.stringify(b.doc.pages), nodes);
+  await getStore().create(id, await sha256(token), String(b.name ?? 'Untitled').slice(0, 200), JSON.stringify(b.doc.pages), nodes, b.doc.styles ? JSON.stringify(b.doc.styles) : '');
   return json({ id, token });
 }
 
@@ -54,7 +56,7 @@ async function snapshot(url: URL) {
   if (!ID.test(id)) return json({ error: 'Bad room id' }, 400);
   const snap = await getStore().snapshot(id);
   if (!snap) return json({ error: 'Room not found' }, 404);
-  return new Response(`{"seq":${snap.seq},"name":${JSON.stringify(snap.name)},"pages":${snap.pages},"nodes":[${snap.nodes.join(',')}]}`, {
+  return new Response(`{"seq":${snap.seq},"name":${JSON.stringify(snap.name)},"pages":${snap.pages},"nodes":[${snap.nodes.join(',')}],"styles":${snap.styles || 'null'}}`, {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
 }
@@ -67,11 +69,13 @@ async function sync(req: Request) {
   const dels: string[] = [];
   let pages = '';
   let name = '';
+  let styles = '';
   for (const op of ops) {
     if (op.t === 'node' && typeof op.node?.id === 'string') upserts.push([op.node.id, JSON.stringify(op.node)]);
     else if (op.t === 'del' && typeof op.id === 'string') dels.push(op.id);
     else if (op.t === 'pages') pages = JSON.stringify(op.pages);
     else if (op.t === 'name') name = String(op.name).slice(0, 200);
+    else if (op.t === 'styles') styles = JSON.stringify(op.styles);
   }
   const presence = JSON.stringify(b.presence ?? {}).slice(0, 4000);
   const r = await getStore().sync({
@@ -86,6 +90,7 @@ async function sync(req: Request) {
     dels,
     pages,
     name,
+    styles,
   });
   if (r.missing) return json({ error: 'Room not found' }, 404);
   // Entries are "seq|clientId|opsJson"; splice them into the response without re-parsing.
@@ -107,6 +112,7 @@ export async function handle(req: Request): Promise<Response> {
     if (path === 'rooms' && req.method === 'POST') return await createRoom(req);
     if (path === 'room' && req.method === 'GET') return await snapshot(url);
     if (path === 'sync' && req.method === 'POST') return await sync(req);
+    if (path === 'mcp') return await handleMcp(req, url);
     if (path === 'health') return json({ ok: true, storage: getStore().kind });
     return json({ error: 'Not found' }, 404);
   } catch (e) {

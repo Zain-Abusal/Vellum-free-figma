@@ -18,6 +18,11 @@ import {
   escapeSelection,
   flattenSelection,
   flipSelection,
+  eyedropper,
+  useAsMask,
+  gotoFrame,
+  selectSibling,
+  startRename,
   groupSelection,
   nudge,
   paste,
@@ -33,12 +38,17 @@ import {
 } from '../actions';
 import type { Tool } from '../types';
 import { lastRun, runExtension } from '../extensions/api';
+import { getUiPrefs } from '../uiPrefs';
+import CommandPalette from './CommandPalette';
+import Preferences from './Preferences';
+import { ExtensionsModal } from './Extensions';
+import EmptyHint from './EmptyHint';
 import Canvas from './Canvas';
 import LeftPanel from './LeftPanel';
 import RightPanel from './RightPanel';
 import { Present, Toolbar, TopBar } from './Chrome';
 
-const TOOL_KEYS: Record<string, Tool> = { v: 'select', f: 'frame', a: 'frame', r: 'rect', o: 'ellipse', l: 'line', p: 'pen', t: 'text', h: 'hand', c: 'comment' };
+const TOOL_KEYS: Record<string, Tool> = { k: 'scale', v: 'select', f: 'frame', a: 'frame', r: 'rect', o: 'ellipse', l: 'line', p: 'pen', t: 'text', h: 'hand', c: 'comment' };
 
 function onKey(e: KeyboardEvent) {
   const t = e.target as HTMLElement;
@@ -66,7 +76,10 @@ function onKey(e: KeyboardEvent) {
     if (k === 'd') return run(duplicateSelection);
     if (k === 'a') return run(selectAll);
     if (k === 'e') return run(flattenSelection);
-    if (e.code === 'Slash') return run(() => s.set({ extensionsOpen: true }));
+    if (e.code === 'Slash' && e.shiftKey) return run(() => s.set({ dialog: 'shortcuts' }));
+    if (e.code === 'Slash') return run(() => s.set({ paletteOpen: true }));
+    if (e.code === 'Comma') return run(() => s.set({ prefsOpen: true }));
+    if (e.code === 'KeyR' && !e.shiftKey && !e.altKey) return run(startRename);
     if (e.code === 'KeyP' && e.altKey) return run(() => {
       const l = lastRun();
       if (l) runExtension(l.ext, l.values);
@@ -75,7 +88,10 @@ function onKey(e: KeyboardEvent) {
     if (e.code === 'Backslash') return run(() => s.set({ hideUI: !s.hideUI }));
     if (e.code === 'KeyG') return run(() => (e.altKey ? wrapInFrame() : e.shiftKey ? ungroupSelection() : groupSelection()));
     if (e.code === 'KeyK' && e.altKey) return run(createComponent);
+    if (e.code === 'KeyM' && e.altKey) return run(useAsMask);
+    if (e.code === 'Digit4' && e.shiftKey) return run(() => s.set({ showGrids: !s.showGrids }));
     if (e.code === 'KeyK' && e.shiftKey) return run(() => document.getElementById('place-image')?.click());
+    if (e.code === 'KeyK' && !e.altKey && !e.shiftKey) return run(() => s.set({ paletteOpen: true }));
     if (e.code === 'KeyB' && e.altKey) return run(detachInstance);
     if (e.code === 'KeyH' && e.shiftKey) return run(() => setProps(s.selection, { visible: !s.selection.every((id) => s.doc.nodes[id]?.visible) }));
     if (e.code === 'KeyL' && e.shiftKey) return run(() => setProps(s.selection, { locked: !s.selection.every((id) => s.doc.nodes[id]?.locked) }));
@@ -86,6 +102,8 @@ function onKey(e: KeyboardEvent) {
     if (k === '0') return run(() => zoomBy(1, 1));
     return;
   }
+  if (e.key === 'Tab' && (t === document.body || t.closest('.canvas-wrap'))) return run(() => selectSibling(e.shiftKey ? -1 : 1));
+  if (e.altKey && !e.shiftKey && e.code === 'KeyL') return run(() => s.set({ collapseNonce: s.collapseNonce + 1 }));
   if (e.altKey && !e.shiftKey) {
     const m: Record<string, Parameters<typeof align>[0]> = { KeyA: 'left', KeyD: 'right', KeyW: 'top', KeyS: 'bottom', KeyH: 'hcenter', KeyV: 'vcenter' };
     if (m[e.code]) return run(() => align(m[e.code]));
@@ -99,9 +117,12 @@ function onKey(e: KeyboardEvent) {
   if (e.shiftKey && e.code === 'KeyR') return run(() => s.set({ showRulers: !s.showRulers }));
   if (e.shiftKey && e.code === 'KeyC') return run(() => s.set({ showComments: !s.showComments }));
   if (e.shiftKey && e.code === 'KeyL') return run(() => s.setTool('arrow'));
+  if (e.shiftKey && e.code === 'KeyS') return run(() => s.setTool('section'));
+  if (e.code === 'KeyN' && !e.altKey) return run(() => gotoFrame(e.shiftKey ? -1 : 1));
+  if (k === 'i' && !e.altKey && !e.shiftKey) return run(eyedropper);
   if (k === 'delete' || k === 'backspace') return run(deleteSelection);
   if (k.startsWith('arrow')) {
-    const step = e.shiftKey ? 10 : 1;
+    const step = e.shiftKey ? getUiPrefs().bigNudge : 1;
     return run(() => nudge(k === 'arrowleft' ? -step : k === 'arrowright' ? step : 0, k === 'arrowup' ? -step : k === 'arrowdown' ? step : 0));
   }
   if (k === 'escape') return run(() => (s.tool !== 'select' ? s.setTool('select') : escapeSelection()));
@@ -185,6 +206,9 @@ export default function Editor({ fileId, room }: { fileId: string; room?: { id: 
   const presenting = useStore((s) => s.presenting);
   const hideUI = useStore((s) => s.hideUI);
   const toast = useStore((s) => s.toast);
+  const paletteOpen = useStore((s) => s.paletteOpen);
+  const prefsOpen = useStore((s) => s.prefsOpen);
+  const extOpen = useStore((s) => s.extensionsOpen);
   const [widths, setWidths] = useState(loadWidths);
 
   // Load (local file, or a live room with a local cache as fallback).
@@ -311,6 +335,7 @@ export default function Editor({ fileId, room }: { fileId: string; room?: { id: 
         {!hideUI && <Resizer side="left" widths={widths} setWidths={setWidths} />}
         <div className="center">
           <Canvas />
+          {!hideUI && <EmptyHint />}
           {!hideUI && <Toolbar />}
           {!hideUI && <div className="save-state">{saved ? 'Saved' : 'Saving…'}</div>}
         </div>
@@ -318,6 +343,9 @@ export default function Editor({ fileId, room }: { fileId: string; room?: { id: 
         {!hideUI && <RightPanel />}
       </div>
       {presenting && <Present />}
+      {paletteOpen && <CommandPalette />}
+      {prefsOpen && <Preferences />}
+      {extOpen && <ExtensionsModal key={String(extOpen)} initial={typeof extOpen === 'string' ? extOpen : undefined} onClose={() => useStore.getState().set({ extensionsOpen: false })} />}
       {toast && (
         <div className="toast" key={toast}>
           {toast}

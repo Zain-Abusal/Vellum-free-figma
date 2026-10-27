@@ -11,7 +11,7 @@ export default defineExtension({
   icon: '✨',
   inputs: [
     { key: 'size', label: 'Size', type: 'number', default: 120, min: 1 },
-    { key: 'color', label: 'Color', type: 'color', default: '#9747ff' },
+    { key: 'color', label: 'Color', type: 'color', default: '#5b4ef0' },
   ],
   run(api, values) {
     const size = Number(values.size) || 120;

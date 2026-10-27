@@ -2,7 +2,7 @@
 
 Extensions are Vellum's version of Figma plugins. Each one is a small TypeScript module that reads and changes the open file through a safe API. They're bundled with the app, so there's nothing to install.
 
-- Open them from the toolbar (puzzle icon) or with **⌘/ (Ctrl+/)**.
+- Open them from the toolbar (puzzle icon), or search any extension by name in **Quick actions (⌘/ or ⌘K)**.
 - Re-run the last one with **⌘⌥P (Ctrl+Alt+P)**.
 - Everything an extension changes is **one undo step**.
 
@@ -101,12 +101,14 @@ All coordinates are **absolute page coordinates**. Reads return **snapshots** (p
 | `create(type, props?, parentId?)` | New `frame`, `component`, `rect`, `ellipse`, `path`, `text` or `image`. Returns its id. In an auto-layout parent, position is automatic. |
 | `update(id, patch)` | Change any property. Changing `x`/`y` moves children too, and changing `w`/`h` applies constraints. |
 | `remove(id)` | Delete a layer and its children. |
+| `duplicate(id, dx?, dy?)` | Copy a layer (with children) right above the original. Returns the new id. |
 | `group(ids)` | Group layers. Returns the group id. |
 | `addImage(src, { at, width, name, parentId })` | Insert an image from a URL (needs CORS) or data URL. It's inlined into the file. |
 | `addSvg(svg, opts)` | Insert an SVG string as an image layer. |
 | `select(ids)` / `zoomTo(ids)` | Change selection / move the camera. |
 | `viewportCenter()` | Centre of the visible canvas. |
 | `notify(message)` | Show a toast. |
+| `download(filename, content, mime?)` | Save a file (string or Blob) to the user's computer. |
 
 The layer properties (`fill`, `stroke`, `radius`, `gradient`, `shadow`, `autoLayout`, `constraints`, `fontSize`, …) are documented in [`src/types.ts`](../src/types.ts) (`SceneNode`).
 
@@ -122,6 +124,14 @@ The layer properties (`fill`, `stroke`, `radius`, `gradient`, `shadow`, `autoLay
 
 | Folder | Inspired by | What it does |
 | --- | --- | --- |
+| `qr-code` | QR Code Generator | Vector QR code from a link or text |
+| `avatars` | Avatar plugins | DiceBear illustrated avatars into shapes |
+| `blob-generator` | Blobs | Organic bezier blob shapes |
+| `table` | Table Creator | Auto-layout table, optionally from CSV |
+| `shadow-presets` | Shadow plugins | Subtle / soft / floating / hard / glow / pressed / neumorphic |
+| `emoji` | Emoji pickers | Insert emoji as text |
+| `html-export` | Anima / Locofy | Selected frame as a standalone HTML page |
+| `radial-repeat` | Figma Draw's radial repeat | Copies around a circle, rotated |
 | `lorem-ipsum` | Lorem ipsum | Placeholder copy for text layers |
 | `placeholder-images` | Unsplash | Random photos into shapes / frames |
 | `icons` | Iconify | Search 200k+ open-source icons, insert as SVG |

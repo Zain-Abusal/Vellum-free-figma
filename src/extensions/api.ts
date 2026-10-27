@@ -1,5 +1,5 @@
 import { useStore } from '../store';
-import { bbox, getPage, insert, makeNode, moveDeep, nextName, removeNode, resizeTo, siblings } from '../doc';
+import { bbox, cloneSubtree, getPage, insert, makeNode, moveDeep, nextName, removeNode, resizeTo, siblings } from '../doc';
 import { topLevel, worldCenter, zoomToBox } from '../actions';
 import type { Doc, Pt, SceneNode } from '../types';
 import type { Extension, ExtensionAPI, Values } from './types';
@@ -82,6 +82,14 @@ export function createApi(): ExtensionAPI {
         if (w !== undefined || h !== undefined) resizeTo(d, id, { x: n.x, y: n.y, w: w ?? n.w, h: h ?? n.h });
       }),
     remove: (id) => edit((d) => removeNode(d, id)),
+    duplicate: (id, dx = 0, dy = 0) => {
+      let out: string | null = null;
+      edit((d) => {
+        const n = d.nodes[id];
+        if (n) out = cloneSubtree(d, id, d, n.parentId, n.pageId, siblings(d, n).indexOf(id) + 1, dx, dy);
+      });
+      return out;
+    },
     group: (ids) => {
       const s = S();
       const valid = ids.filter((id) => s.doc.nodes[id]);
@@ -114,6 +122,14 @@ export function createApi(): ExtensionAPI {
     viewportCenter: () => worldCenter(),
     zoomTo: (ids) => zoomToBox(bbox(ids.map((id) => S().doc.nodes[id]).filter(Boolean)), 4),
     notify,
+    download: (filename, content, mime = 'text/plain') => {
+      const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    },
   };
   return api;
 }

@@ -1,7 +1,8 @@
 import { memo, type ReactNode } from 'react';
 import type { Doc, SceneNode } from './types';
-import { getRings } from './geometry';
+import { getRings, ringsToD, roundedRectD } from './geometry';
 import { useStore } from './store';
+import { textLines } from './doc';
 
 export interface RenderCtx {
   doc: Doc;
@@ -12,6 +13,8 @@ export interface RenderCtx {
   depth: number;
   zoom: number;
   hideId?: string | null;
+  /** Instance overrides applied to main-component layers while rendering an instance. */
+  overrides?: SceneNode['overrides'];
 }
 
 type ChildFn = (id: string) => ReactNode;
@@ -19,14 +22,17 @@ type ChildFn = (id: string) => ReactNode;
 export const fontStack = (f?: string) => `'${f ?? 'Inter'}', system-ui, sans-serif`;
 
 export function pathD(n: SceneNode) {
-  const close = n.closed || !!n.rings;
-  return getRings(n)
-    .map((r) => r.map((p, i) => `${i ? 'L' : 'M'}${n.x + p.x * n.w} ${n.y + p.y * n.h}`).join(' ') + (close && r.length ? ' Z' : ''))
-    .join(' ');
+  return ringsToD(getRings(n), !!(n.closed || n.rings), (x, y) => `${n.x + x * n.w} ${n.y + y * n.h}`);
 }
 
 function strokeProps(n: SceneNode) {
-  return n.stroke ? { stroke: n.stroke, strokeWidth: n.strokeWidth } : {};
+  return n.stroke ? { stroke: n.stroke, strokeWidth: n.strokeWidth, strokeDasharray: n.strokeDash ? `${n.strokeDash} ${n.strokeDash}` : undefined } : {};
+}
+
+/** A rectangle outline honouring per-corner radii. */
+function Box({ n, ...rest }: { n: SceneNode } & React.SVGProps<SVGPathElement & SVGRectElement>) {
+  if (n.radii) return <path d={roundedRectD(n.x, n.y, n.w, n.h, n.radii)} {...rest} />;
+  return <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={n.radius} {...rest} />;
 }
 
 /** Paint for the fill, plus the <defs> it needs. */
@@ -54,10 +60,10 @@ function frameBody(ctx: RenderCtx, n: SceneNode, key: string, hitFill: boolean, 
   return (
     <>
       {def}
-      <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={n.radius} fill={fill} {...strokeProps(n)} />
+      <Box n={n} fill={fill} {...strokeProps(n)} />
       {n.clip && (
         <clipPath id={clipId}>
-          <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={n.radius} />
+          <Box n={n} />
         </clipPath>
       )}
       <g clipPath={n.clip ? `url(#${clipId})` : undefined}>{n.children.map(child)}</g>
@@ -73,22 +79,23 @@ function drawNode(ctx: RenderCtx, n: SceneNode, child: ChildFn): ReactNode {
 
   switch (n.type) {
     case 'rect':
-      body = <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={n.radius} fill={fill} {...strokeProps(n)} />;
+      body = <Box n={n} fill={fill} {...strokeProps(n)} />;
       break;
     case 'ellipse':
       body = <ellipse cx={n.x + n.w / 2} cy={n.y + n.h / 2} rx={n.w / 2} ry={n.h / 2} fill={fill} {...strokeProps(n)} />;
       break;
     case 'image': {
       const cid = `img-${key}`;
+      const rounded = n.radius > 0 || !!n.radii;
       body = (
         <>
-          {n.radius > 0 && (
+          {rounded && (
             <clipPath id={cid}>
-              <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={n.radius} />
+              <Box n={n} />
             </clipPath>
           )}
-          <image href={n.src} x={n.x} y={n.y} width={n.w} height={n.h} preserveAspectRatio={n.imageFit === 'fit' ? 'xMidYMid meet' : 'xMidYMid slice'} clipPath={n.radius > 0 ? `url(#${cid})` : undefined} />
-          {n.stroke && <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={n.radius} fill="none" {...strokeProps(n)} />}
+          <image href={n.src} x={n.x} y={n.y} width={n.w} height={n.h} preserveAspectRatio={n.imageFit === 'fit' ? 'xMidYMid meet' : 'xMidYMid slice'} clipPath={rounded ? `url(#${cid})` : undefined} />
+          {n.stroke && <Box n={n} fill="none" {...strokeProps(n)} />}
           {ctx.interactive && <rect x={n.x} y={n.y} width={n.w} height={n.h} fill="transparent" />}
         </>
       );
@@ -131,7 +138,7 @@ function drawNode(ctx: RenderCtx, n: SceneNode, child: ChildFn): ReactNode {
             style={{ whiteSpace: 'pre' }}
             {...strokeProps(n)}
           >
-            {(n.text ?? '').split('\n').map((line, i) => (
+            {textLines(n).map((line, i) => (
               <tspan key={i} x={ax} y={n.y + (i + 0.5) * lh}>
                 {line || ' '}
               </tspan>
@@ -144,18 +151,31 @@ function drawNode(ctx: RenderCtx, n: SceneNode, child: ChildFn): ReactNode {
     case 'frame':
     case 'component':
       return wrap(ctx, n, key, frameBody(ctx, n, key, ctx.interactive, child));
-    case 'group':
-      body = <>{n.children.map(child)}</>;
+    case 'group': {
+      if (n.masked && n.children.length > 1) {
+        // The bottom layer is the mask (alpha), everything above is clipped by it.
+        const [m, ...rest] = n.children;
+        const mid = `mask-${key}`;
+        body = (
+          <>
+            <mask id={mid} style={{ maskType: 'alpha' }}>
+              {child(m)}
+            </mask>
+            <g mask={`url(#${mid})`}>{rest.map(child)}</g>
+          </>
+        );
+      } else body = <>{n.children.map(child)}</>;
       break;
+    }
     case 'instance': {
       const m = ctx.doc.nodes[n.componentId ?? ''];
       if (!m || ctx.depth > 8) {
-        body = <rect x={n.x} y={n.y} width={n.w} height={n.h} fill="#f3e8ff" stroke="#9747ff" strokeDasharray="4 4" />;
+        body = <rect x={n.x} y={n.y} width={n.w} height={n.h} fill="#d5f5f0" stroke="#0d9488" strokeDasharray="4 4" />;
         break;
       }
       const sx = m.w ? n.w / m.w : 1;
       const sy = m.h ? n.h / m.h : 1;
-      const sub: RenderCtx = { ...ctx, interactive: false, prefix: key + '-', depth: ctx.depth + 1 };
+      const sub: RenderCtx = { ...ctx, interactive: false, prefix: key + '-', depth: ctx.depth + 1, overrides: { ...ctx.overrides, ...n.overrides } };
       body = (
         <>
           {ctx.interactive && <rect x={n.x} y={n.y} width={n.w} height={n.h} fill="transparent" />}
@@ -179,23 +199,39 @@ function drawNode(ctx: RenderCtx, n: SceneNode, child: ChildFn): ReactNode {
 /** Outer group: id, opacity, effects and blend mode. Rotation goes on an inner group so CSS animations on the outer one stay safe. */
 function wrap(ctx: RenderCtx, n: SceneNode, key: string, body: ReactNode) {
   const sh = n.shadow;
+  const inner = n.innerShadow;
   const blur = n.blur ?? 0;
   const fid = `fx-${key}`;
-  const hasFx = !!sh || blur > 0;
+  const hasFx = !!sh || !!inner || blur > 0;
   const opacity = ctx.hideId === n.id ? 0 : n.opacity !== 1 ? n.opacity : undefined;
+  const base = sh ? 'ds' : 'SourceGraphic';
   return (
     <g
       key={key}
       data-id={ctx.interactive ? n.id : undefined}
       data-link={ctx.interactive && n.link ? '1' : undefined}
+      data-mask={n.isMask ? '1' : undefined}
       opacity={opacity}
       filter={hasFx ? `url(#${fid})` : undefined}
       style={n.blendMode && n.blendMode !== 'normal' ? { mixBlendMode: n.blendMode as React.CSSProperties['mixBlendMode'] } : undefined}
     >
       {hasFx && (
         <filter id={fid} x="-50%" y="-50%" width="200%" height="200%">
-          {sh && <feDropShadow dx={sh.x} dy={sh.y} stdDeviation={sh.blur / 2} floodColor={sh.color} floodOpacity={sh.opacity} result="s" />}
-          {blur > 0 && <feGaussianBlur in={sh ? 's' : 'SourceGraphic'} stdDeviation={blur / 2} />}
+          {sh && <feDropShadow dx={sh.x} dy={sh.y} stdDeviation={sh.blur / 2} floodColor={sh.color} floodOpacity={sh.opacity} result="ds" />}
+          {inner && (
+            <>
+              <feFlood floodColor={inner.color} floodOpacity={inner.opacity} result="ic" />
+              <feComposite in="ic" in2="SourceAlpha" operator="out" result="iv" />
+              <feOffset in="iv" dx={inner.x} dy={inner.y} result="io" />
+              <feGaussianBlur in="io" stdDeviation={inner.blur / 2} result="ib" />
+              <feComposite in="ib" in2="SourceAlpha" operator="in" result="is" />
+              <feMerge result="im">
+                <feMergeNode in={base} />
+                <feMergeNode in="is" />
+              </feMerge>
+            </>
+          )}
+          {blur > 0 && <feGaussianBlur in={inner ? 'im' : base} stdDeviation={blur / 2} />}
         </filter>
       )}
       {n.rotation ? <g transform={`rotate(${n.rotation} ${n.x + n.w / 2} ${n.y + n.h / 2})`}>{body}</g> : body}
@@ -205,7 +241,10 @@ function wrap(ctx: RenderCtx, n: SceneNode, key: string, body: ReactNode) {
 
 /** Static render (export, thumbnails, presentation, instance contents). */
 export function renderNode(ctx: RenderCtx, id: string): ReactNode {
-  const n = ctx.doc.nodes[id];
+  const base = ctx.doc.nodes[id];
+  if (!base) return null;
+  const o = ctx.overrides?.[id];
+  const n = o ? { ...base, ...o, fill: o.fill !== undefined ? o.fill : base.fill } : base;
   if (!n || !n.visible || ctx.depth > 10) return null;
   return drawNode(ctx, n, (c) => renderNode(ctx, c));
 }

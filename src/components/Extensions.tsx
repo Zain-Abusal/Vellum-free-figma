@@ -102,9 +102,9 @@ function Runner({ ext, onDone }: { ext: Extension; onDone: () => void }) {
   );
 }
 
-export function ExtensionsModal({ onClose }: { onClose: () => void }) {
+export function ExtensionsModal({ onClose, initial }: { onClose: () => void; initial?: string }) {
   const [q, setQ] = useState('');
-  const [active, setActive] = useState<Extension | null>(null);
+  const [active, setActive] = useState<Extension | null>(() => extensions.find((e) => e.id === initial) ?? null);
   const list = extensions.filter((e) => (e.name + ' ' + e.description).toLowerCase().includes(q.toLowerCase()));
   return (
     <Window id="extensions" width={380} title={active ? active.name : 'Extensions'} onClose={onClose}>

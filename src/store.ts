@@ -49,13 +49,23 @@ export interface State {
   readOnly: boolean;
   collab: CollabInfo | null;
   showRulers: boolean;
+  showGrids: boolean;
   outlineMode: boolean;
   hideUI: boolean;
   showComments: boolean;
   activeComment: string | null;
   /** Short status message shown at the bottom of the canvas. */
   toast: string | null;
-  extensionsOpen: boolean;
+  /** false = closed, true = list, string = open this extension directly. */
+  extensionsOpen: boolean | string;
+  paletteOpen: boolean;
+  /** Top-bar dialogs, openable from anywhere (command palette, menus). */
+  dialog: 'versions' | 'shortcuts' | 'share' | null;
+  prefsOpen: boolean;
+  /** Layer currently being renamed inline in the layers panel (⌘R). */
+  renamingId: string | null;
+  /** Bumped to collapse every layer row (⌥L). */
+  collapseNonce: number;
   set: (p: Partial<State>) => void;
   load: (fileId: string, name: string, doc: Doc, versions: Version[]) => void;
   /** Apply an edit. `history: false` is for live drags (call checkpoint() once first). */
@@ -101,12 +111,18 @@ export const useStore = create<State>((set, get) => {
     readOnly: false,
     collab: null,
     showRulers: false,
+    showGrids: true,
     outlineMode: false,
     hideUI: false,
     showComments: false,
     activeComment: null,
     toast: null,
     extensionsOpen: false,
+    paletteOpen: false,
+    dialog: null,
+    prefsOpen: false,
+    renamingId: null,
+    collapseNonce: 0,
     set: (p) => set(p),
     load: (fileId, name, doc, versions) =>
       set({

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { addPage, deletePage, insertInstance, moveLayer, setProps } from '../actions';
+import { addPage, applyColorStyle, applyTextStyle, deletePage, insertInstance, moveLayer, setProps } from '../actions';
 import { isAncestor, isContainer } from '../doc';
 import { renderNode } from '../render';
 import { Icons, TypeIcon } from './icons';
@@ -32,12 +32,22 @@ function LayerRow({ id, depth, flat }: { id: string; depth: number; flat?: boole
   const hovered = useStore((s) => s.hoverId === id);
   const containsSel = useStore((s) => s.selection.some((x) => isAncestor(s.doc, id, x)));
   const [open, setOpen] = useState(false);
-  const [renaming, setRenaming] = useState(false);
+  const renaming = useStore((s) => s.renamingId === id);
+  const setRenaming = (v: boolean) => useStore.getState().set({ renamingId: v ? id : null });
+  const collapseNonce = useStore((s) => s.collapseNonce);
   const [zone, setZone] = useState<'above' | 'below' | 'inside' | null>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (containsSel) setOpen(true);
   }, [containsSel]);
+  useEffect(() => {
+    if (collapseNonce) setOpen(false);
+  }, [collapseNonce]);
+  // Keep the selected layer visible in long layer lists.
+  useEffect(() => {
+    if (selected) rowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selected]);
 
   if (!n) return null;
   const hasKids = n.children.length > 0;
@@ -52,6 +62,10 @@ function LayerRow({ id, depth, flat }: { id: string; depth: number; flat?: boole
   return (
     <>
       <div
+        ref={rowRef}
+        role="treeitem"
+        aria-selected={selected}
+        aria-expanded={hasKids ? open : undefined}
         className={`layer-row${selected ? ' selected' : ''}${hovered ? ' hovered' : ''}${containsSel && !selected ? ' parent-selected' : ''}${comp ? ' comp' : ''}${!n.visible ? ' hidden' : ''}${zone ? ' drop-' + zone : ''}`}
         style={{ paddingLeft: 8 + depth * 16 }}
         onClick={click}
@@ -88,7 +102,7 @@ function LayerRow({ id, depth, flat }: { id: string; depth: number; flat?: boole
           {hasKids && <Icons.chevron />}
         </span>
         <span className="layer-icon">
-          <TypeIcon type={n.type} />
+          <TypeIcon type={n.type} node={n} />
         </span>
         {renaming ? (
           <InlineName
@@ -213,10 +227,47 @@ function Layers() {
   );
 }
 
+function StyleRows() {
+  const styles = useStore((s) => s.doc.styles);
+  const selection = useStore((s) => s.selection);
+  if (!styles || (!styles.colors.length && !styles.texts.length)) return <p className="muted pad">No styles yet. Create one from the Fill or Text section of the Design panel.</p>;
+  return (
+    <div className="style-list">
+      {styles.colors.map((c) => (
+        <button key={c.id} className="style-row" title={`Apply ${c.name} to selection`} onClick={() => selection.length && applyColorStyle(selection, c.id)}>
+          <span className="swatch" style={{ background: c.color }} />
+          <span className="layer-name">{c.name}</span>
+          <span className="muted mono">{c.color.toUpperCase()}</span>
+        </button>
+      ))}
+      {styles.texts.map((t) => (
+        <button key={t.id} className="style-row" title={`Apply ${t.name} to selected text`} onClick={() => selection.length && applyTextStyle(selection, t.id)}>
+          <span className="type-ag" style={{ fontFamily: t.fontFamily, fontWeight: t.fontWeight }}>
+            Ag
+          </span>
+          <span className="layer-name">{t.name}</span>
+          <span className="muted mono">
+            {t.fontSize}/{Math.round(t.lineHeight * 100)}%
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Assets() {
   const doc = useStore((s) => s.doc);
   const [q, setQ] = useState('');
+  const [view, setView] = useState<'grid' | 'list'>(() => (localStorage.getItem('vellum:assets-view') as 'grid' | 'list') ?? 'grid');
   const comps = Object.values(doc.nodes).filter((n) => n.type === 'component' && n.name.toLowerCase().includes(q.toLowerCase()));
+  const setV = (v: 'grid' | 'list') => {
+    setView(v);
+    try {
+      localStorage.setItem('vellum:assets-view', v);
+    } catch {
+      /* ignore */
+    }
+  };
   return (
     <div className="assets">
       <div className="search">
@@ -225,9 +276,17 @@ function Assets() {
       </div>
       <div className="section-head">
         <span className="section-toggle">Local components</span>
+        <span className="row tight">
+          <button className={`icon-btn${view === 'list' ? ' on' : ''}`} title="List view" aria-pressed={view === 'list'} onClick={() => setV('list')}>
+            <Icons.list />
+          </button>
+          <button className={`icon-btn${view === 'grid' ? ' on' : ''}`} title="Grid view" aria-pressed={view === 'grid'} onClick={() => setV('grid')}>
+            <Icons.grid />
+          </button>
+        </span>
       </div>
       {comps.length === 0 && <p className="muted pad">Select a layer and press {navigator.platform.includes('Mac') ? '⌥⌘K' : 'Ctrl+Alt+K'} to create a component. Drag components from here onto the canvas.</p>}
-      <div className="asset-grid">
+      <div className={view === 'grid' ? 'asset-grid' : 'asset-list'}>
         {comps.map((c) => (
           <div
             key={c.id}
@@ -242,6 +301,10 @@ function Assets() {
           </div>
         ))}
       </div>
+      <div className="section-head">
+        <span className="section-toggle">Styles</span>
+      </div>
+      <StyleRows />
     </div>
   );
 }

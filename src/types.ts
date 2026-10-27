@@ -1,6 +1,6 @@
 export type NodeType = 'frame' | 'group' | 'component' | 'instance' | 'rect' | 'ellipse' | 'path' | 'text' | 'image';
 
-export type Tool = 'select' | 'hand' | 'frame' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'star' | 'pen' | 'text' | 'comment';
+export type Tool = 'select' | 'hand' | 'frame' | 'section' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'star' | 'pen' | 'text' | 'comment' | 'scale';
 
 export type ExportFormat = 'png' | 'jpg' | 'svg' | 'pdf';
 
@@ -8,6 +8,27 @@ export interface Pt {
   x: number;
   y: number;
 }
+
+/** Path vertex. Optional bezier handles (ix,iy = incoming, ox,oy = outgoing) live in the same space as x,y. */
+export interface PathPoint extends Pt {
+  ix?: number;
+  iy?: number;
+  ox?: number;
+  oy?: number;
+}
+
+export interface LayoutGrid {
+  type: 'columns' | 'rows' | 'grid';
+  count: number;
+  /** Cell size for 'grid'. */
+  size: number;
+  gutter: number;
+  margin: number;
+  color: string;
+  visible: boolean;
+}
+
+export type Transition = 'instant' | 'dissolve' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down';
 
 export interface Shadow {
   x: number;
@@ -33,6 +54,11 @@ export interface AutoLayout {
   gap: number;
   padding: number;
   align: 'start' | 'center' | 'end';
+  /** Main-axis distribution (default 'start'). */
+  justify?: 'start' | 'center' | 'end' | 'between';
+  /** Hug contents (default true) or keep a fixed size, per axis. */
+  hugMain?: boolean;
+  hugCross?: boolean;
 }
 
 export type HConstraint = 'left' | 'right' | 'leftright' | 'center' | 'scale';
@@ -62,16 +88,33 @@ export interface SceneNode {
   stroke: string | null;
   strokeWidth: number;
   radius: number;
+  /** Independent corner radii [top-left, top-right, bottom-right, bottom-left]. Wins over `radius`. */
+  radii?: [number, number, number, number] | null;
+  /** Dash length for dashed strokes (0 / undefined = solid). */
+  strokeDash?: number;
   opacity: number;
   visible: boolean;
   locked: boolean;
   shadow?: Shadow | null;
+  innerShadow?: Shadow | null;
+  /** This layer masks the layers above it in its group. */
+  isMask?: boolean;
+  /** Group whose first child is a mask. */
+  masked?: boolean;
+  /** Auto layout child: fill the parent's main axis / stretch across the cross axis. */
+  layoutFill?: boolean;
+  layoutStretch?: boolean;
   blur?: number;
   blendMode?: string;
   constraints?: { h: HConstraint; v: VConstraint };
   exports?: ExportSetting[];
+  /** Linked local styles (editing the style updates every linked layer). */
+  fillStyleId?: string;
+  textStyleId?: string;
   // text
   text?: string;
+  /** 'width' = grows with content (default); 'height' = fixed width, wraps lines. */
+  textAutoResize?: 'width' | 'height';
   fontSize?: number;
   fontWeight?: number;
   fontFamily?: string;
@@ -80,22 +123,29 @@ export interface SceneNode {
   letterSpacing?: number;
   textDecoration?: 'none' | 'underline' | 'line-through';
   // path — points normalised to the node box (0..1). `rings` (compound paths) wins over `points`.
-  points?: Pt[];
-  rings?: Pt[][];
+  points?: PathPoint[];
+  rings?: PathPoint[][];
   closed?: boolean;
   arrowEnd?: boolean;
   polySides?: number;
   starRatio?: number;
   // instance
   componentId?: string;
+  /** Per-instance overrides of the main component's layers (text, visibility, fill). */
+  overrides?: Record<string, { text?: string; visible?: boolean; fill?: string | null }>;
   // image
   src?: string;
   imageFit?: 'fill' | 'fit';
   // frame / component
   autoLayout?: AutoLayout | null;
   clip?: boolean;
+  /** Frame drawn as a Figma-style section (organizes frames, name tag inside). */
+  section?: boolean;
+  layoutGrid?: LayoutGrid | null;
   // prototype
+  /** Frame id, or '__back' to go back. */
   link?: string | null;
+  linkTransition?: Transition;
 }
 
 export interface CommentReply {
@@ -122,9 +172,31 @@ export interface Page {
   comments?: Comment[];
 }
 
+export interface ColorStyle {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface TextStyle {
+  id: string;
+  name: string;
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: number;
+  lineHeight: number;
+  letterSpacing: number;
+}
+
+export interface Styles {
+  colors: ColorStyle[];
+  texts: TextStyle[];
+}
+
 export interface Doc {
   pages: Page[];
   nodes: Record<string, SceneNode>;
+  styles?: Styles;
 }
 
 export interface Version {

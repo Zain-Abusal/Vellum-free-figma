@@ -23,6 +23,7 @@ export interface SyncArgs {
   dels: string[];
   pages: string;
   name: string;
+  styles: string;
 }
 
 export interface SyncResult {
@@ -40,11 +41,12 @@ export interface Snapshot {
   name: string;
   pages: string;
   nodes: string[];
+  styles: string;
 }
 
 export interface RoomStore {
   kind: 'redis' | 'memory';
-  create(room: string, editHash: string, name: string, pages: string, nodes: [string, string][]): Promise<void>;
+  create(room: string, editHash: string, name: string, pages: string, nodes: [string, string][], styles: string): Promise<void>;
   snapshot(room: string): Promise<Snapshot | null>;
   sync(a: SyncArgs): Promise<SyncResult>;
 }
@@ -76,6 +78,7 @@ if canEdit == 1 and ARGV[7] ~= '' then
   end
   if ARGV[8] ~= '' then redis.call('SET', KEYS[4], ARGV[8]) end
   if ARGV[9] ~= '' then redis.call('HSET', KEYS[1], 'name', ARGV[9]) end
+  if ARGV[6] ~= '' then redis.call('HSET', KEYS[1], 'styles', ARGV[6]) end
   pushed = redis.call('INCR', KEYS[2])
   redis.call('ZADD', KEYS[5], pushed, pushed .. '|' .. ARGV[1] .. '|' .. ARGV[7])
   redis.call('ZREMRANGEBYRANK', KEYS[5], 0, -${LOG_KEEP + 1})
@@ -113,16 +116,16 @@ return {seq, pushed, canEdit, reset, entries, alive}
 
 const SNAPSHOT_LUA = `
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1} end
-return {tonumber(redis.call('GET', KEYS[2]) or '0'), redis.call('HGET', KEYS[1], 'name') or '', redis.call('GET', KEYS[4]) or '[]', redis.call('HVALS', KEYS[3])}
+return {tonumber(redis.call('GET', KEYS[2]) or '0'), redis.call('HGET', KEYS[1], 'name') or '', redis.call('GET', KEYS[4]) or '[]', redis.call('HVALS', KEYS[3]), redis.call('HGET', KEYS[1], 'styles') or ''}
 `;
 
 function redisStore(redis: Redis): RoomStore {
   return {
     kind: 'redis',
-    async create(room, editHash, name, pages, nodes) {
+    async create(room, editHash, name, pages, nodes, styles) {
       const [meta, seq, nodesKey, pagesKey, log] = keys(room);
       const p = redis.pipeline();
-      p.hset(meta, { name, edit: editHash, created: String(Date.now()) });
+      p.hset(meta, { name, edit: editHash, created: String(Date.now()), styles });
       p.set(seq, '0');
       p.set(pagesKey, pages);
       // Keep each request well under Upstash's request-size limit.
@@ -144,10 +147,10 @@ function redisStore(redis: Redis): RoomStore {
     async snapshot(room) {
       const r = (await redis.eval(SNAPSHOT_LUA, keys(room), [])) as unknown[];
       if (r[0] === -1) return null;
-      return { seq: Number(r[0]), name: String(r[1] ?? ''), pages: String(r[2]), nodes: (r[3] as string[]) ?? [] };
+      return { seq: Number(r[0]), name: String(r[1] ?? ''), pages: String(r[2]), nodes: (r[3] as string[]) ?? [], styles: String(r[4] ?? '') };
     },
     async sync(a) {
-      const args = [a.clientId, String(a.since), a.tokenHash, a.presence, String(a.now), '', a.opsJson, a.pages, a.name, String(a.upserts.length), ...a.upserts.flat(), ...a.dels];
+      const args = [a.clientId, String(a.since), a.tokenHash, a.presence, String(a.now), a.styles, a.opsJson, a.pages, a.name, String(a.upserts.length), ...a.upserts.flat(), ...a.dels];
       const r = (await redis.eval(SYNC_LUA, keys(a.room), args)) as unknown[];
       if (r[0] === -1) return { missing: true, seq: 0, pushed: 0, canEdit: false, reset: false, entries: [], presence: [] };
       return {
@@ -177,12 +180,12 @@ function memoryStore(): RoomStore {
   const rooms = (g.__vellumRooms ??= new Map<string, MemRoom>());
   return {
     kind: 'memory',
-    async create(room, editHash, name, pages, nodes) {
-      rooms.set(room, { meta: { name, edit: editHash }, seq: 0, nodes: new Map(nodes), pages, log: [], presence: new Map() });
+    async create(room, editHash, name, pages, nodes, styles) {
+      rooms.set(room, { meta: { name, edit: editHash, styles }, seq: 0, nodes: new Map(nodes), pages, log: [], presence: new Map() });
     },
     async snapshot(room) {
       const r = rooms.get(room);
-      return r ? { seq: r.seq, name: r.meta.name, pages: r.pages, nodes: [...r.nodes.values()] } : null;
+      return r ? { seq: r.seq, name: r.meta.name, pages: r.pages, nodes: [...r.nodes.values()], styles: r.meta.styles ?? '' } : null;
     },
     async sync(a) {
       const r = rooms.get(a.room);
@@ -194,6 +197,7 @@ function memoryStore(): RoomStore {
         for (const id of a.dels) r.nodes.delete(id);
         if (a.pages) r.pages = a.pages;
         if (a.name) r.meta.name = a.name;
+        if (a.styles) r.meta.styles = a.styles;
         pushed = ++r.seq;
         r.log.push({ seq: pushed, v: `${pushed}|${a.clientId}|${a.opsJson}` });
         if (r.log.length > LOG_KEEP) r.log.splice(0, r.log.length - LOG_KEEP);

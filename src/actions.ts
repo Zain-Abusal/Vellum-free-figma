@@ -19,7 +19,7 @@ import {
   uid,
   type Box,
 } from './doc';
-import { booleanRings, setAbsRings, toPolygons, type BoolOp } from './geometry';
+import { booleanRings, flipRing, setAbsRings, toPolygons, type BoolOp } from './geometry';
 import type { Doc, Pt, SceneNode } from './types';
 
 const S = () => useStore.getState();
@@ -422,9 +422,8 @@ function flipNode(d: Doc, id: string, axis: 'h' | 'v', c: number) {
   else n.y = 2 * c - n.y - n.h;
   if (n.rotation) n.rotation = (360 - n.rotation) % 360;
   if (n.type === 'path') {
-    const flip = (r: Pt[]) => r.map((p) => (axis === 'h' ? { x: 1 - p.x, y: p.y } : { x: p.x, y: 1 - p.y }));
-    if (n.rings) n.rings = n.rings.map(flip);
-    else n.points = flip(n.points ?? []);
+    if (n.rings) n.rings = n.rings.map((r) => flipRing(r, axis));
+    else n.points = flipRing(n.points ?? [], axis);
   }
   if (n.gradient && n.gradient.type === 'linear') n.gradient.angle = axis === 'h' ? 180 - n.gradient.angle : -n.gradient.angle;
   for (const k of n.children) flipNode(d, k, axis, c);
@@ -621,10 +620,12 @@ export async function addImageFiles(files: File[], at?: Pt) {
 
 /* ---------- prototype ---------- */
 
-export function topFrames(doc: Doc, pageId: string) {
+/** Top-level frames, including frames inside top-level sections. */
+export function topFrames(doc: Doc, pageId: string): SceneNode[] {
   return getPage(doc, pageId)
     .children.map((id) => doc.nodes[id])
-    .filter((n) => n && n.visible && isFrameLike(n));
+    .filter((n) => n && n.visible && isFrameLike(n))
+    .flatMap((n) => (n.section ? n.children.map((c) => doc.nodes[c]).filter((c) => c?.visible && isFrameLike(c) && !c.section) : [n]));
 }
 
 export function startPresent() {
@@ -637,7 +638,7 @@ export function startPresent() {
 
 /* ---------- identity (comments & multiplayer) ---------- */
 
-const COLORS = ['#f24822', '#ff7262', '#ffa629', '#14ae5c', '#0d99ff', '#9747ff', '#e93d82', '#0fa958'];
+const COLORS = ['#f24822', '#ff7262', '#ffa629', '#14ae5c', '#5b4ef0', '#0d9488', '#e93d82', '#0fa958'];
 
 export function getMe(): { name: string; color: string } {
   try {
@@ -657,4 +658,207 @@ export function setMe(me: { name: string; color: string }) {
   } catch {
     /* ignore */
   }
+}
+
+/* ---------- local styles (linked) ---------- */
+
+const ensureStyles = (d: Doc) => (d.styles ??= { colors: [], texts: [] });
+
+export function createColorStyle(name: string, color: string, applyTo: string[] = []) {
+  const id = uid();
+  S().update((d) => {
+    ensureStyles(d).colors.push({ id, name, color });
+    for (const n of applyTo.map((i) => d.nodes[i]).filter(Boolean)) Object.assign(n, { fill: color, gradient: null, fillStyleId: id });
+  });
+  return id;
+}
+
+export function applyColorStyle(ids: string[], styleId: string) {
+  S().update((d) => {
+    const st = d.styles?.colors.find((c) => c.id === styleId);
+    if (!st) return;
+    for (const id of ids) if (d.nodes[id]) Object.assign(d.nodes[id], { fill: st.color, gradient: null, fillStyleId: styleId });
+  });
+}
+
+/** Editing a style updates every layer linked to it. */
+export function updateColorStyle(styleId: string, patch: { name?: string; color?: string }, history = true) {
+  S().update((d) => {
+    const st = d.styles?.colors.find((c) => c.id === styleId);
+    if (!st) return;
+    Object.assign(st, patch);
+    if (patch.color) for (const id in d.nodes) if (d.nodes[id].fillStyleId === styleId) d.nodes[id].fill = patch.color;
+  }, history);
+}
+
+const TEXT_KEYS = ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing'] as const;
+
+export function createTextStyle(name: string, fromId: string) {
+  const n = S().doc.nodes[fromId];
+  if (!n || n.type !== 'text') return;
+  const id = uid();
+  S().update((d) => {
+    ensureStyles(d).texts.push({ id, name, fontFamily: n.fontFamily ?? 'Inter', fontSize: n.fontSize ?? 16, fontWeight: n.fontWeight ?? 400, lineHeight: n.lineHeight ?? 1.2, letterSpacing: n.letterSpacing ?? 0 });
+    d.nodes[fromId].textStyleId = id;
+  });
+}
+
+export function applyTextStyle(ids: string[], styleId: string) {
+  S().update((d) => {
+    const st = d.styles?.texts.find((t) => t.id === styleId);
+    if (!st) return;
+    for (const id of ids) {
+      const n = d.nodes[id];
+      if (n?.type !== 'text') continue;
+      for (const k of TEXT_KEYS) (n as unknown as Record<string, unknown>)[k] = st[k];
+      n.textStyleId = styleId;
+    }
+  });
+}
+
+export function updateTextStyle(styleId: string, patch: Partial<Omit<import('./types').TextStyle, 'id'>>) {
+  S().update((d) => {
+    const st = d.styles?.texts.find((t) => t.id === styleId);
+    if (!st) return;
+    Object.assign(st, patch);
+    for (const id in d.nodes) {
+      const n = d.nodes[id];
+      if (n.textStyleId === styleId) for (const k of TEXT_KEYS) (n as unknown as Record<string, unknown>)[k] = st[k];
+    }
+  });
+}
+
+export function deleteStyle(kind: 'colors' | 'texts', styleId: string) {
+  S().update((d) => {
+    if (!d.styles) return;
+    if (kind === 'colors') d.styles.colors = d.styles.colors.filter((c) => c.id !== styleId);
+    else d.styles.texts = d.styles.texts.filter((t) => t.id !== styleId);
+    // Layers keep their current look but are detached.
+    for (const id in d.nodes) {
+      const n = d.nodes[id];
+      if (n.fillStyleId === styleId) n.fillStyleId = undefined;
+      if (n.textStyleId === styleId) n.textStyleId = undefined;
+    }
+  });
+}
+
+/* ---------- navigation ---------- */
+
+/** Tab / Shift+Tab: next / previous sibling (Figma). */
+export function selectSibling(dir: 1 | -1) {
+  const s = S();
+  const n = s.doc.nodes[s.selection[0]];
+  const list = n ? siblings(s.doc, n) : getPage(s.doc, s.pageId).children;
+  if (!list.length) return;
+  const i = n ? list.indexOf(n.id) : -1;
+  // Layers panel lists top → bottom, which is the reverse of the array.
+  const next = list[(i - dir + list.length) % list.length];
+  s.select([next]);
+}
+
+/** N / Shift+N: zoom to the next / previous top-level frame. */
+export function gotoFrame(dir: 1 | -1) {
+  const s = S();
+  const frames = topFrames(s.doc, s.pageId).sort((a, b) => a.y - b.y || a.x - b.x);
+  if (!frames.length) return;
+  const cur = s.selection.length ? ancestry(s.doc, s.selection[0])[0] : null;
+  const i = frames.findIndex((f) => f.id === cur);
+  const f = frames[(i + dir + frames.length) % frames.length] ?? frames[0];
+  s.select([f.id]);
+  zoomToBox(f, 2);
+}
+
+export function startRename() {
+  const s = S();
+  if (s.selection.length === 1 && !s.readOnly) s.set({ renamingId: s.selection[0] });
+}
+
+/* ---------- masks ---------- */
+
+/** ⌃⌘M: the bottom-most selected layer masks the others (wrapped in a "Mask group"). Toggles off on a mask. */
+export function useAsMask() {
+  const s = S();
+  const ids = topLevel(s.doc, s.selection);
+  if (!ids.length) return;
+  const one = s.doc.nodes[ids[0]];
+  if (ids.length === 1 && one.isMask) {
+    s.update((d) => {
+      d.nodes[one.id].isMask = false;
+      const p = one.parentId ? d.nodes[one.parentId] : null;
+      if (p?.masked) p.masked = false;
+    });
+    return;
+  }
+  if (ids.length < 2) return notifyMsg('Select a shape and the layers to mask (the bottom one becomes the mask).');
+  let gid: string | null = null;
+  s.update((d) => {
+    const first = d.nodes[ids[0]];
+    const sib = siblings(d, first);
+    const ordered = ids.filter((id) => d.nodes[id].parentId === first.parentId).sort((a, b) => sib.indexOf(a) - sib.indexOf(b));
+    const idx = Math.max(...ordered.map((id) => sib.indexOf(id)));
+    const g = makeNode('group', first.pageId, { name: 'Mask group', masked: true });
+    insert(d, g, first.parentId, idx + 1);
+    for (const id of ordered) moveTo(d, id, g.id, first.pageId);
+    d.nodes[ordered[0]].isMask = true;
+    gid = g.id;
+  });
+  if (gid) s.select([gid]);
+}
+
+/* ---------- eyedropper (I) ---------- */
+
+export async function eyedropper() {
+  const s = S();
+  const ED = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper;
+  if (!ED) return notifyMsg('Your browser does not support the eyedropper (try Chrome or Edge).');
+  try {
+    const { sRGBHex } = await new ED().open();
+    const hex = sRGBHex.startsWith('#') ? sRGBHex.toLowerCase() : '#' + (sRGBHex.match(/\d+/g) ?? []).slice(0, 3).map((v) => (+v).toString(16).padStart(2, '0')).join('');
+    if (s.selection.length) setProps(s.selection, { fill: hex, gradient: null, fillStyleId: undefined });
+    else {
+      navigator.clipboard?.writeText(hex).catch(() => undefined);
+      notifyMsg(`Picked ${hex.toUpperCase()} (copied)`);
+    }
+  } catch {
+    /* cancelled */
+  }
+}
+
+/* ---------- frame presets ---------- */
+
+export const FRAME_PRESETS: { group: string; items: [string, number, number][] }[] = [
+  { group: 'Phone', items: [['iPhone 16', 393, 852], ['iPhone 16 Pro Max', 440, 956], ['iPhone SE', 375, 667], ['Android Compact', 412, 917], ['Android Medium', 700, 840]] },
+  { group: 'Tablet', items: [['iPad mini', 744, 1133], ['iPad Pro 11"', 834, 1194], ['iPad Pro 13"', 1032, 1376], ['Surface Pro', 912, 1368]] },
+  { group: 'Desktop', items: [['Desktop', 1440, 1024], ['MacBook Air', 1280, 832], ['MacBook Pro 14"', 1512, 982], ['HD', 1920, 1080], ['Wireframe', 1440, 900]] },
+  { group: 'Watch', items: [['Watch 45mm', 198, 242], ['Watch 41mm', 176, 215]] },
+  { group: 'Social', items: [['Instagram post', 1080, 1350], ['Instagram story', 1080, 1920], ['X post', 1200, 675], ['LinkedIn post', 1200, 1200], ['YouTube thumbnail', 1280, 720], ['Facebook cover', 820, 312]] },
+  { group: 'Paper', items: [['A4', 595, 842], ['A5', 420, 595], ['Letter', 612, 792], ['Tabloid', 792, 1224]] },
+  { group: 'Slides', items: [['Slide 16:9', 1920, 1080], ['Slide 4:3', 1024, 768]] },
+];
+
+/** Insert a frame preset to the right of existing top-level content (or resize the selected frame). */
+export function insertFramePreset(name: string, w: number, h: number) {
+  const s = S();
+  const sel = s.selection.length === 1 ? s.doc.nodes[s.selection[0]] : null;
+  if (sel && isFrameLike(sel) && !sel.section) {
+    s.update((d) => resizeTo(d, sel.id, { x: sel.x, y: sel.y, w, h }));
+    return;
+  }
+  const top = getPage(s.doc, s.pageId).children.map((id) => s.doc.nodes[id]).filter(Boolean);
+  const b = bbox(top);
+  const x = b ? Math.round(b.x + b.w + 100) : Math.round(worldCenter().x - w / 2);
+  const y = b ? Math.round(b.y) : Math.round(worldCenter().y - h / 2);
+  let id = '';
+  s.update((d) => {
+    const n = makeNode('frame', s.pageId, { name, x, y, w, h });
+    insert(d, n, null);
+    id = n.id;
+  });
+  s.set({ selection: [id], tool: 'select' });
+  zoomToBox({ x, y, w, h }, 1);
+}
+
+function notifyMsg(message: string) {
+  S().set({ toast: message });
+  setTimeout(() => S().toast === message && S().set({ toast: null }), 3500);
 }

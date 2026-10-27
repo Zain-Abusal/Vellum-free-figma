@@ -1,7 +1,8 @@
 import { produce } from 'immer';
 import { useStore, type CollabInfo, type Peer } from './store';
 import { getMe } from './actions';
-import type { Doc, Page, Pt, SceneNode } from './types';
+import { layoutAll } from './doc';
+import type { Doc, Page, Pt, SceneNode, Styles } from './types';
 
 /*
  * Live collaboration client.
@@ -10,7 +11,7 @@ import type { Doc, Page, Pt, SceneNode } from './types';
  * short change log; each tick returns other people's changes and cursors.
  */
 
-type Op = { t: 'node'; node: SceneNode } | { t: 'del'; id: string } | { t: 'pages'; pages: Page[] } | { t: 'name'; name: string };
+type Op = { t: 'node'; node: SceneNode } | { t: 'del'; id: string } | { t: 'pages'; pages: Page[] } | { t: 'name'; name: string } | { t: 'styles'; styles: Styles };
 interface Entry {
   seq: number;
   c: string;
@@ -34,8 +35,8 @@ export async function fetchRoom(id: string): Promise<{ seq: number; name: string
   const r = await fetch(`/api/room?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(await errorText(r));
-  const j = (await r.json()) as { seq: number; name: string; pages: Page[]; nodes: SceneNode[] };
-  return { seq: j.seq, name: j.name, doc: { pages: j.pages, nodes: Object.fromEntries(j.nodes.map((n) => [n.id, n])) } };
+  const j = (await r.json()) as { seq: number; name: string; pages: Page[]; nodes: SceneNode[]; styles?: Styles | null };
+  return { seq: j.seq, name: j.name, doc: { pages: j.pages, nodes: Object.fromEntries(j.nodes.map((n) => [n.id, n])), ...(j.styles ? { styles: j.styles } : {}) } };
 }
 
 /** Restores tree invariants after concurrent edits (orphans, dangling children, duplicates). */
@@ -72,8 +73,11 @@ function applyOps(d: Doc, ops: Op[]) {
     if (op.t === 'node') d.nodes[op.node.id] = op.node;
     else if (op.t === 'del') delete d.nodes[op.id];
     else if (op.t === 'pages') d.pages = op.pages;
+    else if (op.t === 'styles') d.styles = op.styles;
   }
   repair(d);
+  // Remote edits (incl. AI agents over MCP) may carry approximate text sizes; re-measure locally.
+  layoutAll(d);
 }
 
 let cursor: Pt | null = null;
@@ -101,6 +105,7 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
   const pending = new Map<string, SceneNode | null>();
   let pagesDirty = false;
   let nameDirty = false;
+  let stylesDirty = false;
 
   useStore.setState({ collab: { roomId, token, canEdit: !!token, status: 'connecting', peers: [] }, readOnly: !token });
 
@@ -108,6 +113,7 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
     for (const id in b.nodes) if (a.nodes[id] !== b.nodes[id]) pending.set(id, b.nodes[id]);
     for (const id in a.nodes) if (!(id in b.nodes)) pending.set(id, null);
     if (a.pages !== b.pages) pagesDirty = true;
+    if (a.styles !== b.styles) stylesDirty = true;
   };
 
   const schedule = (delay: number) => {
@@ -168,6 +174,7 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
     for (const [id, n] of pending) ops.push(n ? { t: 'node', node: n } : { t: 'del', id });
     if (pagesDirty) ops.push({ t: 'pages', pages: s.doc.pages });
     if (nameDirty) ops.push({ t: 'name', name: s.fileName });
+    if (stylesDirty && s.doc.styles) ops.push({ t: 'styles', styles: s.doc.styles });
     return ops;
   };
 
@@ -181,11 +188,13 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
     const sent = new Map(pending);
     const sentPages = pagesDirty;
     const sentName = nameDirty;
-    const sentKeys = new Set([...sent.keys(), ...(sentPages ? ['#pages'] : [])]);
+    const sentStyles = stylesDirty;
+    const sentKeys = new Set([...sent.keys(), ...(sentPages ? ['#pages'] : []), ...(sentStyles ? ['#styles'] : [])]);
     if (canEdit) {
       pending.clear();
       pagesDirty = false;
       nameDirty = false;
+      stylesDirty = false;
     }
     const me = getMe();
     const presence = { id: clientId, name: me.name, color: me.color, pageId: s.pageId, cursor, selection: s.selection.slice(0, 50) };
@@ -215,9 +224,9 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
         for (const e of j.entries) {
           if (e.c === clientId) continue;
           for (const op of e.ops) {
-            const key = op.t === 'node' ? op.node.id : op.t === 'del' ? op.id : op.t === 'pages' ? '#pages' : '#name';
+            const key = op.t === 'node' ? op.node.id : op.t === 'del' ? op.id : '#' + op.t;
             // Newer local edits win; so do ours that landed after theirs.
-            if (pending.has(key) || (key === '#pages' && pagesDirty) || (key === '#name' && nameDirty)) continue;
+            if (pending.has(key) || (key === '#pages' && pagesDirty) || (key === '#name' && nameDirty) || (key === '#styles' && stylesDirty)) continue;
             if (j.pushed && e.seq < j.pushed && sentKeys.has(key)) continue;
             remote.push(op);
           }
@@ -234,11 +243,12 @@ export function startSync(roomId: string, token: string | undefined, initialSeq:
       for (const [id, n] of sent) if (!pending.has(id)) pending.set(id, n);
       if (sentPages) pagesDirty = true;
       if (sentName) nameDirty = true;
+      if (sentStyles) stylesDirty = true;
       setCollab({ status: 'offline', error: err instanceof Error ? err.message : String(err) });
     } finally {
       inFlight = false;
       const idle = Date.now() - lastActivity;
-      const busy = pending.size > 0 || pagesDirty || nameDirty;
+      const busy = pending.size > 0 || pagesDirty || nameDirty || stylesDirty;
       schedule(document.hidden ? 5000 : busy ? 0 : idle < 10_000 ? 300 : idle < 60_000 ? 1200 : 3000);
     }
   }

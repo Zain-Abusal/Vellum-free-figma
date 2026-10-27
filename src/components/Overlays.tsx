@@ -122,7 +122,7 @@ const ago = (t: number) => {
 const colorFor = (name: string) => {
   let h = 0;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return ['#f24822', '#ffa629', '#14ae5c', '#0d99ff', '#9747ff', '#e93d82'][h % 6];
+  return ['#f24822', '#ffa629', '#14ae5c', '#5b4ef0', '#0d9488', '#e93d82'][h % 6];
 };
 
 function Composer({ placeholder, onSubmit, autoFocus }: { placeholder: string; onSubmit: (t: string) => void; autoFocus?: boolean }) {

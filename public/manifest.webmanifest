@@ -1,0 +1,10 @@
+{
+  "name": "Vellum",
+  "short_name": "Vellum",
+  "description": "Free design editor with live collaboration",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1e1e1e",
+  "theme_color": "#1e1e1e",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

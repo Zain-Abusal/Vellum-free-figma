@@ -2,22 +2,25 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { fontStack, NodeView } from '../render';
 import { ancestry, bbox, cloneSubtree, descendants, frameAt, getPage, insert, inside, intersects, isFrameLike, makeNode, moveDeep, moveTo, nextName, pathFromAbs, removeNode, resizeTo, siblings, type Box } from '../doc';
-import { absRings, getRings, setAbsRings, shapePoints } from '../geometry';
+import { absRings, getRings, ringsFromAbs, ringsToD, setAbsRings, shapePoints } from '../geometry';
 import { addImageFiles, editText, insertInstance, resolveHit, setProps, topLevel, viewport, zoomToFit } from '../actions';
 import { reportCursor } from '../collab';
 import { CURSOR, HANDLE_ANGLE, resizeCursor } from '../cursors';
 import { loadPrefs } from '../files';
-import type { Doc, Pt, SceneNode } from '../types';
+import type { Doc, PathPoint, Pt, SceneNode } from '../types';
 import ContextMenu from './ContextMenu';
+import { useUiPrefs } from '../uiPrefs';
 import { CommentsLayer, Measure, Rulers } from './Overlays';
 
 type Drag =
   | { kind: 'pan'; sx: number; sy: number; cx: number; cy: number }
   | { kind: 'marquee'; start: Pt; base: string[] }
   | { kind: 'move'; start: Pt; ids: string[]; startBox: Box; orig: Record<string, Pt>; started: boolean; alt: boolean; hit: string }
-  | { kind: 'resize'; start: Pt; handle: string; startBox: Box; ids: string[]; orig: Record<string, SceneNode>; started: boolean; keepAspect: boolean }
+  | { kind: 'resize'; start: Pt; handle: string; startBox: Box; ids: string[]; orig: Record<string, SceneNode>; started: boolean; keepAspect: boolean; scale: boolean }
   | { kind: 'rotate'; id: string; c: Pt; a0: number; r0: number; started: boolean }
-  | { kind: 'vpoint'; id: string; r: number; i: number; start: Pt; orig: Pt[][]; started: boolean }
+  | { kind: 'vpoint'; id: string; r: number; i: number; start: Pt; orig: PathPoint[][]; started: boolean }
+  | { kind: 'vhandle'; id: string; r: number; i: number; which: 'in' | 'out'; orig: PathPoint[][]; started: boolean }
+  | { kind: 'penHandle'; idx: number; start: Pt }
   | { kind: 'create'; start: Pt; id: string; type: SceneNode['type']; line: boolean };
 
 interface MoveEvent {
@@ -29,8 +32,8 @@ interface MoveEvent {
 }
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
-const ACCENT = '#0d99ff';
-const PURPLE = '#9747ff';
+const ACCENT = 'var(--accent)';
+const PURPLE = 'var(--component)';
 
 function handlePos(h: string, b: Box): Pt {
   const x = h.includes('w') ? b.x : h.includes('e') ? b.x + b.w : b.x + b.w / 2;
@@ -76,7 +79,7 @@ function snap(doc: Doc, ids: string[], box: Box, dx: number, dy: number, th: num
 /** Pages on the default background follow the light/dark theme. */
 const DEFAULT_BG = '#f5f5f5';
 
-const CREATE_TOOLS = new Set(['frame', 'rect', 'ellipse', 'line', 'arrow', 'polygon', 'star']);
+const CREATE_TOOLS = new Set(['frame', 'section', 'rect', 'ellipse', 'line', 'arrow', 'polygon', 'star']);
 
 export default function Canvas() {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -92,6 +95,8 @@ export default function Canvas() {
   const hoverId = useStore((s) => s.hoverId);
   const preview = useStore((s) => s.dragPreview);
   const showRulers = useStore((s) => s.showRulers);
+  const showGrids = useStore((s) => s.showGrids);
+  const { canvasDots } = useUiPrefs();
   const outlineMode = useStore((s) => s.outlineMode);
   const readOnly = useStore((s) => s.readOnly);
   const peers = useStore((s) => s.collab?.peers);
@@ -102,9 +107,9 @@ export default function Canvas() {
   const raf = useRef(0);
   const [marquee, setMarquee] = useState<Box | null>(null);
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
-  const [pen, setPenState] = useState<Pt[] | null>(null);
-  const penRef = useRef<Pt[] | null>(null);
-  const setPen = (p: Pt[] | null) => {
+  const [pen, setPenState] = useState<PathPoint[] | null>(null);
+  const penRef = useRef<PathPoint[] | null>(null);
+  const setPen = (p: PathPoint[] | null) => {
     penRef.current = p;
     setPenState(p);
   };
@@ -258,7 +263,8 @@ export default function Canvas() {
     setPenHover(null);
     const s = get();
     if (pts.length < 2) return;
-    const node = makeNode('path', s.pageId, { ...pathFromAbs(pts), closed, fill: closed ? '#d9d9d9' : null });
+    const r = ringsFromAbs([pts], closed);
+    const node = makeNode('path', s.pageId, { x: r.x, y: r.y, w: r.w, h: r.h, points: r.norm[0], closed, fill: closed ? '#d9d9d9' : null });
     s.update((d) => {
       node.name = nextName(d, 'path');
       insert(d, node, null);
@@ -308,6 +314,12 @@ export default function Canvas() {
     const target = e.target as Element;
 
     // Vector edit mode: drag points; clicking elsewhere leaves the mode.
+    const vhAttr = target.getAttribute('data-vhandle');
+    if (s.vectorEditId && vhAttr) {
+      const [r, i, which] = vhAttr.split(':');
+      drag.current = { kind: 'vhandle', id: s.vectorEditId, r: +r, i: +i, which: which as 'in' | 'out', orig: absRings(s.doc.nodes[s.vectorEditId]), started: false };
+      return;
+    }
     const vpAttr = target.getAttribute('data-vpoint');
     if (s.vectorEditId && vpAttr) {
       const [r, i] = vpAttr.split(':').map(Number);
@@ -336,8 +348,10 @@ export default function Canvas() {
       const orig: Record<string, SceneNode> = {};
       for (const id of ids) for (const k of [id, ...descendants(s.doc, id)]) orig[k] = s.doc.nodes[k];
       const one = ids.length === 1 ? s.doc.nodes[ids[0]] : null;
-      const keepAspect = !!one && (one.type === 'text' || one.type === 'image');
-      drag.current = { kind: 'resize', start: p, handle, startBox, ids, orig, started: false, keepAspect };
+      // Text: side handles set a fixed (wrapping) width like Figma; other handles scale the type.
+      const keepAspect = !!one && (one.type === 'image' || (one.type === 'text' && handle !== 'e' && handle !== 'w'));
+      const scale = s.tool === 'scale';
+      drag.current = { kind: 'resize', start: p, handle, startBox, ids, orig, started: false, keepAspect: keepAspect || scale, scale };
       setDragCursor(resizeCursor(HANDLE_ANGLE[handle] + (one?.rotation ?? 0)));
       return;
     }
@@ -346,9 +360,11 @@ export default function Canvas() {
 
     if (s.tool === 'pen') {
       const cur = penRef.current;
-      if (!cur) setPen([p]);
-      else if (cur.length > 2 && Math.hypot(cur[0].x - p.x, cur[0].y - p.y) * s.camera.zoom < 8) finishPen(true);
-      else setPen([...cur, p]);
+      if (cur && cur.length > 2 && Math.hypot(cur[0].x - p.x, cur[0].y - p.y) * s.camera.zoom < 8) return finishPen(true);
+      const next = [...(cur ?? []), { x: p.x, y: p.y }];
+      setPen(next);
+      // Dragging right after placing a point pulls out symmetric bezier handles.
+      drag.current = { kind: 'penHandle', idx: next.length - 1, start: p };
       return;
     }
 
@@ -368,19 +384,22 @@ export default function Canvas() {
     if (CREATE_TOOLS.has(s.tool)) {
       const t = s.tool;
       const line = t === 'line' || t === 'arrow';
-      const type: SceneNode['type'] = t === 'frame' || t === 'rect' || t === 'ellipse' ? t : 'path';
+      const type: SceneNode['type'] = t === 'section' ? 'frame' : t === 'frame' || t === 'rect' || t === 'ellipse' ? t : 'path';
       const extra: Partial<SceneNode> = line
         ? { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }], name: t === 'arrow' ? 'Arrow' : 'Line', arrowEnd: t === 'arrow' }
         : t === 'polygon'
           ? { points: shapePoints(3), closed: true, fill: '#d9d9d9', stroke: null, polySides: 3, name: 'Polygon' }
           : t === 'star'
             ? { points: shapePoints(5, 0.382), closed: true, fill: '#d9d9d9', stroke: null, polySides: 5, starRatio: 0.382, name: 'Star' }
-            : {};
-      const parentId = frameAt(s.doc, p, s.pageId);
+            : t === 'section'
+              ? { section: true, fill: '#ebebeb', stroke: '#d4d4d4', clip: false, radius: 4 }
+              : {};
+      const parentId = t === 'section' ? null : frameAt(s.doc, p, s.pageId);
       const node = makeNode(type, s.pageId, { x: p.x, y: p.y, w: 0, h: 0, ...extra });
       s.checkpoint();
       s.update((d) => {
-        if (!extra.name) node.name = nextName(d, type);
+        if (t === 'section') node.name = `Section ${Object.values(d.nodes).filter((n) => n.section).length + 1}`;
+        else if (!extra.name) node.name = nextName(d, type);
         insert(d, node, parentId && !d.nodes[parentId].autoLayout ? parentId : null);
       }, false);
       s.select([node.id]);
@@ -420,7 +439,7 @@ export default function Canvas() {
     reportCursor(p);
     if (s.tool === 'pen' && penRef.current) setPenHover(p);
     if (!d) {
-      const id = s.tool === 'select' ? hitAt(e.target as Element, s) : null;
+      const id = s.tool === 'select' || s.tool === 'scale' ? hitAt(e.target as Element, s) : null;
       if (id !== s.hoverId) s.set({ hoverId: id });
       return;
     }
@@ -523,6 +542,33 @@ export default function Canvas() {
         const nb = { x: Math.round(Math.min(x1, x2)), y: Math.round(Math.min(y1, y2)), w: Math.round(Math.abs(x2 - x1)), h: Math.round(Math.abs(y2 - y1)) };
         const sx = sb.w ? nb.w / sb.w : 1;
         const sy = sb.h ? nb.h / sb.h : 1;
+        if (d.scale) {
+          // Scale tool (K): everything scales, including strokes, radii, text and effects.
+          const k = sb.w ? sx : sy;
+          s.update((doc) => {
+            for (const id in d.orig) {
+              const o = d.orig[id];
+              const n = doc.nodes[id];
+              if (!n) continue;
+              const sc = <T extends { x: number; y: number; blur: number }>(v: T | null | undefined) => (v ? { ...v, x: v.x * k, y: v.y * k, blur: v.blur * k } : v);
+              Object.assign(n, {
+                x: nb.x + (o.x - sb.x) * k,
+                y: nb.y + (o.y - sb.y) * k,
+                w: o.w * k,
+                h: o.h * k,
+                strokeWidth: o.strokeWidth * k,
+                radius: o.radius * k,
+                radii: o.radii ? (o.radii.map((r) => r * k) as [number, number, number, number]) : o.radii,
+                shadow: sc(o.shadow),
+                innerShadow: sc(o.innerShadow),
+                blur: o.blur ? o.blur * k : o.blur,
+              });
+              if (o.type === 'text') Object.assign(n, { fontSize: Math.max(1, (o.fontSize ?? 16) * k), letterSpacing: (o.letterSpacing ?? 0) * k });
+              if (o.autoLayout) n.autoLayout = { ...o.autoLayout, gap: o.autoLayout.gap * k, padding: o.autoLayout.padding * k };
+            }
+          }, false);
+          break;
+        }
         s.update((doc) => {
           // Reset the subtree to its pre-drag state, then apply the resize (constraints included).
           for (const id in d.orig) {
@@ -530,12 +576,17 @@ export default function Canvas() {
             const n = doc.nodes[id];
             if (!n) continue;
             Object.assign(n, { x: o.x, y: o.y, w: o.w, h: o.h });
-            if (o.type === 'text') n.fontSize = o.fontSize;
+            if (o.type === 'text') {
+              n.fontSize = o.fontSize;
+              n.textAutoResize = o.textAutoResize;
+            }
           }
           for (const id of d.ids) {
             const o = d.orig[id];
             const box = { x: nb.x + (o.x - sb.x) * sx, y: nb.y + (o.y - sb.y) * sy, w: sb.w ? o.w * sx : nb.w, h: sb.h ? o.h * sy : nb.h };
-            if (o.type === 'text') {
+            if (o.type === 'text' && d.ids.length === 1 && (h === 'e' || h === 'w')) {
+              Object.assign(doc.nodes[id], { textAutoResize: 'height', x: box.x, w: Math.max(8, box.w) });
+            } else if (o.type === 'text') {
               doc.nodes[id].fontSize = Math.max(1, Math.round((o.fontSize ?? 16) * (sb.h ? sy : 1) * 10) / 10);
               moveDeep(doc, id, box.x - o.x, box.y - o.y);
             } else resizeTo(doc, id, box);
@@ -560,8 +611,33 @@ export default function Canvas() {
           s.checkpoint();
         }
         const rings = d.orig.map((r) => r.map((q) => ({ ...q })));
-        rings[d.r][d.i] = { x: Math.round(d.orig[d.r][d.i].x + p.x - d.start.x), y: Math.round(d.orig[d.r][d.i].y + p.y - d.start.y) };
+        const o = d.orig[d.r][d.i];
+        const dx = Math.round(o.x + p.x - d.start.x) - o.x;
+        const dy = Math.round(o.y + p.y - d.start.y) - o.y;
+        rings[d.r][d.i] = { ...o, x: o.x + dx, y: o.y + dy, ...(o.ix !== undefined ? { ix: o.ix + dx, iy: o.iy! + dy } : {}), ...(o.ox !== undefined ? { ox: o.ox + dx, oy: o.oy! + dy } : {}) };
         s.update((doc) => setAbsRings(doc.nodes[d.id], rings), false);
+        break;
+      }
+      case 'vhandle': {
+        if (!d.started) {
+          d.started = true;
+          s.checkpoint();
+        }
+        const rings = d.orig.map((r) => r.map((q) => ({ ...q })));
+        const q = rings[d.r][d.i];
+        const hx = p.x - q.x;
+        const hy = p.y - q.y;
+        // Handles stay mirrored unless Alt is held (Figma-style "break symmetry").
+        if (d.which === 'out') Object.assign(q, { ox: p.x, oy: p.y }, e.altKey ? {} : { ix: q.x - hx, iy: q.y - hy });
+        else Object.assign(q, { ix: p.x, iy: p.y }, e.altKey ? {} : { ox: q.x - hx, oy: q.y - hy });
+        s.update((doc) => setAbsRings(doc.nodes[d.id], rings), false);
+        break;
+      }
+      case 'penHandle': {
+        const cur = penRef.current;
+        if (!cur || Math.hypot(p.x - d.start.x, p.y - d.start.y) * z < 3) return;
+        const next = cur.map((q, i) => (i === d.idx ? { x: q.x, y: q.y, ox: p.x, oy: p.y, ix: 2 * q.x - p.x, iy: 2 * q.y - p.y } : q));
+        setPen(next);
         break;
       }
       case 'create': {
@@ -662,7 +738,7 @@ export default function Canvas() {
       const n = s.doc.nodes[d.id];
       if (!n) return;
       const z = s.camera.zoom;
-      if (n.w * z < 3 && n.h * z < 3) setProps([d.id], d.line ? { w: 100, h: 0, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }] } : { w: 100, h: 100 }, false);
+      if (n.w * z < 3 && n.h * z < 3) setProps([d.id], d.line ? { w: 100, h: 0, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }] } : n.section ? { w: 600, h: 400 } : { w: 100, h: 100 }, false);
       if (d.type === 'frame') {
         // Like Figma: drawing a frame around layers adopts them.
         s.update((doc) => {
@@ -680,6 +756,24 @@ export default function Canvas() {
   const onDoubleClick = (e: React.MouseEvent) => {
     const s = get();
     if (s.tool === 'pen') return finishPen(false);
+    const vp = document.elementFromPoint(e.clientX, e.clientY)?.getAttribute('data-vpoint');
+    if (s.vectorEditId && vp) {
+      // Toggle a point between sharp corner and smooth curve.
+      const [r, i] = vp.split(':').map(Number);
+      const n = s.doc.nodes[s.vectorEditId];
+      const rings = absRings(n);
+      const q = rings[r][i];
+      if (q.ix !== undefined || q.ox !== undefined) rings[r][i] = { x: q.x, y: q.y };
+      else {
+        const prev = rings[r][(i - 1 + rings[r].length) % rings[r].length];
+        const next = rings[r][(i + 1) % rings[r].length];
+        const tx = (next.x - prev.x) / 4;
+        const ty = (next.y - prev.y) / 4;
+        rings[r][i] = { x: q.x, y: q.y, ix: q.x - tx, iy: q.y - ty, ox: q.x + tx, oy: q.y + ty };
+      }
+      s.update((d) => setAbsRings(d.nodes[n.id], rings));
+      return;
+    }
     const el = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-id]');
     if (!el || el.hasAttribute('data-title')) return;
     const id = el.getAttribute('data-id')!;
@@ -770,10 +864,19 @@ export default function Canvas() {
               ? CURSOR.comment
               : CURSOR.crosshair);
   const selColor = selNodes.length && selNodes.every(isComp) ? PURPLE : ACCENT;
-  const showHandles = selBox && tool === 'select' && !editing && !vnode && !readOnly;
+  const showHandles = selBox && (tool === 'select' || tool === 'scale') && !editing && !vnode && !readOnly;
 
   return (
-    <div ref={wrapRef} className="canvas-wrap" style={{ background: page.bg === DEFAULT_BG ? 'var(--canvas)' : page.bg }} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+    <div
+      ref={wrapRef}
+      className="canvas-wrap"
+      style={{
+        backgroundColor: page.bg === DEFAULT_BG ? 'var(--canvas)' : page.bg,
+        // Signature dotted canvas: dots follow pan/zoom; fades out when zoomed far out.
+        ...(canvasDots && page.bg === DEFAULT_BG && z > 0.15
+          ? { backgroundImage: 'radial-gradient(circle, var(--canvas-dot) 1px, transparent 1.2px)', backgroundSize: `${24 * z}px ${24 * z}px`, backgroundPosition: `${camera.x}px ${camera.y}px` }
+          : {}),
+      }} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       <svg
         ref={svgRef}
         className={`canvas-svg${outlineMode ? ' outline-mode' : ''}`}
@@ -792,9 +895,19 @@ export default function Canvas() {
           {visibleIds.map((id) => (
             <NodeView key={id} id={id} />
           ))}
+          {showGrids && <LayoutGrids doc={doc} ids={visibleIds} />}
           {pen && (
             <>
-              <polyline points={[...pen, ...(penHover ? [penHover] : [])].map((p) => `${p.x},${p.y}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth={1.5 / z} />
+              <path d={ringsToD([[...pen, ...(penHover && !drag.current ? [penHover] : [])]], false, (x, y) => `${x} ${y}`)} fill="none" stroke={ACCENT} strokeWidth={1.5 / z} />
+              {pen.map((p, i) =>
+                p.ox !== undefined ? (
+                  <g key={'h' + i}>
+                    <line x1={p.ix} y1={p.iy} x2={p.ox} y2={p.oy} stroke={ACCENT} strokeWidth={1 / z} />
+                    <circle cx={p.ix} cy={p.iy} r={2.5 / z} fill={ACCENT} />
+                    <circle cx={p.ox} cy={p.oy} r={2.5 / z} fill={ACCENT} />
+                  </g>
+                ) : null,
+              )}
               {pen.map((p, i) => (
                 <circle key={i} cx={p.x} cy={p.y} r={3.5 / z} fill="#fff" stroke={ACCENT} strokeWidth={1.5 / z} />
               ))}
@@ -803,12 +916,23 @@ export default function Canvas() {
         </g>
 
         <g className="overlay">
-          {page.children.map((id) => {
+          {page.children.flatMap((id) => (doc.nodes[id]?.section ? [id, ...doc.nodes[id].children] : [id])).map((id) => {
             const raw = doc.nodes[id];
             if (!raw || !raw.visible || !isFrameLike(raw)) return null;
             const n = shifted(raw);
             const p = S(n.x, n.y);
             const sel = selection.includes(id);
+            if (n.section) {
+              const w = Math.min(n.name.length * 6.6 + 16, Math.max(0, n.w * z - 12));
+              return (
+                <g key={'t' + id} data-id={id} data-title="" className="section-tag">
+                  <rect x={p.x + 6} y={p.y + 6} width={w} height={20} rx={5} fill={sel ? ACCENT : 'var(--section-tag)'} />
+                  <text x={p.x + 14} y={p.y + 20} fill={sel ? '#fff' : 'var(--text)'} className="frame-title">
+                    {n.name}
+                  </text>
+                </g>
+              );
+            }
             return (
               <text key={'t' + id} data-id={id} data-title="" x={p.x} y={p.y - 6} className="frame-title" fill={n.type === 'component' ? PURPLE : sel ? ACCENT : '#8c8c8c'}>
                 {n.type === 'component' ? '❖ ' : ''}
@@ -833,7 +957,23 @@ export default function Canvas() {
                 r.map((q, i) => {
                   const p = S(vnode.x + q.x * vnode.w, vnode.y + q.y * vnode.h);
                   const on = vSel?.r === ri && vSel.i === i;
-                  return <rect key={`v${ri}-${i}`} data-vpoint={`${ri}:${i}`} className={`vpoint${on ? ' on' : ''}`} x={p.x - 4} y={p.y - 4} width={8} height={8} rx={on ? 0 : 4} />;
+                  const H = (hx?: number, hy?: number, which?: string) =>
+                    hx === undefined || hy === undefined ? null : (() => {
+                      const h = S(vnode.x + hx * vnode.w, vnode.y + hy * vnode.h);
+                      return (
+                        <g key={which}>
+                          <line x1={p.x} y1={p.y} x2={h.x} y2={h.y} className="vhandle-line" />
+                          <circle data-vhandle={`${ri}:${i}:${which}`} cx={h.x} cy={h.y} r={4} className="vhandle" />
+                        </g>
+                      );
+                    })();
+                  return (
+                    <g key={`v${ri}-${i}`}>
+                      {on && H(q.ix, q.iy, 'in')}
+                      {on && H(q.ox, q.oy, 'out')}
+                      <rect data-vpoint={`${ri}:${i}`} className={`vpoint${on ? ' on' : ''}${q.ox !== undefined ? ' smooth' : ''}`} x={p.x - 4} y={p.y - 4} width={8} height={8} rx={q.ox !== undefined ? 4 : 1.5} />
+                    </g>
+                  );
                 }),
               );
             })()}
@@ -867,7 +1007,7 @@ export default function Canvas() {
               })}
               {HANDLES.filter((h) => h.length === 2).map((h) => {
                 const p = S(handlePos(h, selBox).x, handlePos(h, selBox).y);
-                return <rect key={h} data-handle={h} x={p.x - 4} y={p.y - 4} width={8} height={8} className="handle" stroke={selColor} style={{ cursor: resizeCursor(HANDLE_ANGLE[h] + (single?.rotation ?? 0)) }} />;
+                return <circle key={h} data-handle={h} cx={p.x} cy={p.y} r={4.5} className="handle" stroke={selColor} style={{ cursor: resizeCursor(HANDLE_ANGLE[h] + (single?.rotation ?? 0)) }} />;
               })}
               {(() => {
                 const p = S(selBox.x + selBox.w / 2, selBox.y + selBox.h);
@@ -875,7 +1015,7 @@ export default function Canvas() {
                 const w = label.length * 6.2 + 10;
                 return (
                   <g className="size-label">
-                    <rect x={p.x - w / 2} y={p.y + 8} width={w} height={17} rx={3} fill={selColor} />
+                    <rect x={p.x - w / 2} y={p.y + 8} width={w} height={18} rx={9} fill={selColor} />
                     <text x={p.x} y={p.y + 20} textAnchor="middle" fill="#fff">
                       {label}
                     </text>
@@ -890,7 +1030,7 @@ export default function Canvas() {
           {marquee &&
             (() => {
               const p = S(marquee.x, marquee.y);
-              return <rect x={p.x} y={p.y} width={marquee.w * z} height={marquee.h * z} fill="rgba(13,153,255,0.08)" stroke={ACCENT} />;
+              return <rect x={p.x} y={p.y} width={marquee.w * z} height={marquee.h * z} fill="var(--accent-fill)" stroke={ACCENT} />;
             })()}
           {guides.x !== null && <line x1={guides.x * z + camera.x} x2={guides.x * z + camera.x} y1={0} y2="100%" stroke="#f24822" />}
           {guides.y !== null && <line y1={guides.y * z + camera.y} y2={guides.y * z + camera.y} x1={0} x2="100%" stroke="#f24822" />}
@@ -926,7 +1066,8 @@ export default function Canvas() {
               style={{
                 left: p.x,
                 top: p.y,
-                width: Math.max(editing.w * z + 8, 24),
+                width: editing.textAutoResize === 'height' ? editing.w * z : Math.max(editing.w * z + 8, 24),
+                whiteSpace: editing.textAutoResize === 'height' ? 'pre-wrap' : 'pre',
                 height: Math.max(editing.h * z, 16),
                 fontSize: (editing.fontSize ?? 16) * z,
                 fontFamily: fontStack(editing.fontFamily),
@@ -949,5 +1090,46 @@ export default function Canvas() {
       <CommentsLayer cam={camera} draft={draft} setDraft={setDraft} />
       {menu && <ContextMenu at={menu} onClose={() => setMenu(null)} />}
     </div>
+  );
+}
+
+/** Layout grid overlays for frames (not exported, toggle with ⌃⇧4). */
+function LayoutGrids({ doc, ids }: { doc: Doc; ids: string[] }) {
+  const frames: SceneNode[] = [];
+  const walk = (list: string[]) => {
+    for (const id of list) {
+      const n = doc.nodes[id];
+      if (!n || !n.visible) continue;
+      if (n.layoutGrid?.visible && isFrameLike(n)) frames.push(n);
+      if (isFrameLike(n) || n.type === 'group') walk(n.children);
+    }
+  };
+  walk(ids);
+  return (
+    <g className="layout-grids" pointerEvents="none">
+      {frames.map((f) => {
+        const g = f.layoutGrid!;
+        const rects: [number, number, number, number][] = [];
+        if (g.type === 'grid') {
+          const sz = Math.max(1, g.size);
+          for (let x = 0; x < f.w; x += sz) rects.push([f.x + x, f.y, 0.5, f.h]);
+          for (let y = 0; y < f.h; y += sz) rects.push([f.x, f.y + y, f.w, 0.5]);
+        } else {
+          const len = g.type === 'columns' ? f.w : f.h;
+          const cell = Math.max(0, (len - g.margin * 2 - g.gutter * (g.count - 1)) / Math.max(1, g.count));
+          for (let i = 0; i < g.count; i++) {
+            const o = g.margin + i * (cell + g.gutter);
+            rects.push(g.type === 'columns' ? [f.x + o, f.y, cell, f.h] : [f.x, f.y + o, f.w, cell]);
+          }
+        }
+        return (
+          <g key={f.id} clipPath={undefined}>
+            {rects.map(([x, y, w, h], i) => (
+              <rect key={i} x={x} y={y} width={w} height={h} fill={g.color} fillOpacity={g.type === 'grid' ? 0.6 : 0.12} />
+            ))}
+          </g>
+        );
+      })}
+    </g>
   );
 }

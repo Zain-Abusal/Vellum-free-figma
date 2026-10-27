@@ -6,11 +6,11 @@ import { uid } from '../doc';
 import { download, exportLayers } from '../exporter';
 import { createRoom } from '../collab';
 import { deleteFile, putFile } from '../files';
-import type { Tool } from '../types';
+import type { Tool, Transition } from '../types';
 import { Icons, Logo } from './icons';
-import { ExtensionsModal } from './Extensions';
 import { Window } from './Window';
 import { setThemePref, useThemePref } from '../theme';
+import { useUiPrefs } from '../uiPrefs';
 
 const isMac = navigator.platform.includes('Mac');
 const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -90,9 +90,36 @@ function CopyField({ label, value }: { label: string; value: string }) {
             setTimeout(() => setCopied(false), 1200);
           }}
         >
-          {copied ? 'Copied' : 'Copy link'}
+          {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Connect an AI agent over MCP: it sees collaborators live and edits the file with a 🤖 cursor. */
+function McpConnect({ roomId, token }: { roomId: string; token?: string }) {
+  const [agent, setAgent] = useState('Claude');
+  const url = `${location.origin}/api/mcp?room=${roomId}${token ? `&token=${token}` : ''}&name=${encodeURIComponent(agent || 'AI agent')}`;
+  const cli = `claude mcp add --transport http vellum "${url}"`;
+  const json = JSON.stringify({ mcpServers: { vellum: { type: 'http', url } } }, null, 2);
+  return (
+    <div className="mcp-box">
+      <strong>Connect an AI agent (MCP)</strong>
+      <p className="muted">
+        Give Claude or any MCP client live access to this file. It can see who is online and what they selected, read and render the design, and edit it while you watch its 🤖 cursor.
+        {!token && ' This is a view-only connection (no edits).'}
+      </p>
+      <label className="field">
+        <span className="muted">Agent name (shown on its cursor)</span>
+        <input className="text-input" value={agent} onChange={(e) => setAgent(e.target.value.slice(0, 30))} />
+      </label>
+      <CopyField label="MCP server URL" value={url} />
+      <CopyField label="Claude Code" value={cli} />
+      <details>
+        <summary className="muted">Other clients (JSON config)</summary>
+        <pre className="code">{json}</pre>
+      </details>
     </div>
   );
 }
@@ -162,6 +189,7 @@ function ShareModal({ onClose }: { onClose: () => void }) {
           {collab.token && <CopyField label="Invite to edit" value={`${base}#/room/${collab.roomId}/${collab.token}`} />}
           <CopyField label="Invite to view" value={`${base}#/room/${collab.roomId}`} />
           <p className="muted">Anyone with a link can open this file. Everyone with the edit link sees changes and cursors live, from anywhere.</p>
+          <McpConnect roomId={collab.roomId} token={collab.token} />
         </>
       ) : (
         <>
@@ -184,7 +212,11 @@ const SHORTCUTS: [string, string][] = [
   ['Move / select', 'V'],
   ['Frame', 'F or A'],
   ['Rectangle / ellipse / line / arrow', 'R / O / L / ⇧L'],
-  ['Pen', 'P'],
+  ['Section', '⇧S'],
+  ['Pen (drag to curve; double-click a point to smooth it)', 'P'],
+  ['Scale tool / eyedropper', 'K / I'],
+  ['Use as mask', `${ALT}${MOD}M`],
+  ['Layout grids', '⌃⇧4'],
   ['Text', 'T'],
   ['Comment', 'C'],
   ['Hand (pan)', 'H or hold Space'],
@@ -208,6 +240,12 @@ const SHORTCUTS: [string, string][] = [
   ['Hide / lock', `⇧${MOD}H / ⇧${MOD}L`],
   ['Rulers / outlines / comments', `⇧R / ${MOD}Y / ⇧C`],
   ['Show / hide UI', `${MOD}\\`],
+  ['Quick actions (search everything)', `${MOD}/ or ${MOD}K`],
+  ['Preferences', `${MOD},`],
+  ['Next / previous layer', 'Tab / ⇧Tab'],
+  ['Next / previous frame', 'N / ⇧N'],
+  ['Rename layer', `${MOD}R`],
+  ['Collapse all layers', `${ALT}L`],
   ['Extensions / run last extension', `${MOD}/ / ${MOD}${ALT}P`],
   ['Select parent / children', 'Esc / Enter'],
   ['Edit text or vector points', 'Double-click or Enter'],
@@ -235,12 +273,12 @@ function Avatars() {
             if (p.cursor) requestAnimationFrame(() => centerOn(p.cursor!));
           }}
         >
-          {p.name[0]?.toUpperCase()}
+          {Array.from(p.name)[0]?.toUpperCase()}
         </button>
       ))}
       {collab.peers.length > 5 && <span className="avatar more">+{collab.peers.length - 5}</span>}
       <span className="avatar me" style={{ background: me.color }} title={`${me.name} (you)`}>
-        {me.name[0]?.toUpperCase()}
+        {Array.from(me.name)[0]?.toUpperCase()}
       </span>
     </div>
   );
@@ -255,7 +293,10 @@ export function TopBar() {
   const showComments = useStore((s) => s.showComments);
   const [menu, setMenu] = useState(false);
   const [zoomMenu, setZoomMenu] = useState(false);
-  const [modal, setModal] = useState<'versions' | 'shortcuts' | 'share' | null>(null);
+  const modal = useStore((s) => s.dialog);
+  const setModal = (dialog: 'versions' | 'shortcuts' | 'share' | null) => useStore.getState().set({ dialog });
+  const pageName = useStore((s) => s.doc.pages.find((p) => p.id === s.pageId)?.name);
+  const prefs = useUiPrefs();
   const menuRef = useOutside(menu, () => setMenu(false));
   const zoomRef = useOutside(zoomMenu, () => setZoomMenu(false));
   const set = useStore.getState().set;
@@ -313,16 +354,28 @@ export function TopBar() {
               {item('Theme: Light', () => setThemePref('light'), undefined, theme === 'light')}
               {item('Theme: Dark', () => setThemePref('dark'), undefined, theme === 'dark')}
               <div className="menu-sep" />
-              {item('Keyboard shortcuts', () => setModal('shortcuts'))}
+              {item('Quick actions…', () => set({ paletteOpen: true }), `${MOD}/`)}
+              {item('Preferences…', () => set({ prefsOpen: true }), `${MOD},`)}
+              {item('Keyboard shortcuts', () => setModal('shortcuts'), `${MOD}⇧?`)}
             </div>
           )}
         </div>
         <div className="file-title">
-          <span className="muted">Drafts /</span>
-          <input className="file-name" value={fileName} readOnly={readOnly} onChange={(e) => set({ fileName: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />
+          <span className="muted crumb">Drafts</span>
+          <span className="muted crumb-sep">/</span>
+          <input className="file-name" aria-label="File name" style={{ width: `calc(${Math.min(Math.max(fileName.length, 4), 32)}ch + 16px)` }} value={fileName} readOnly={readOnly} onChange={(e) => set({ fileName: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />
+          {pageName && <span className="page-pill" title="Current page">{pageName}</span>}
         </div>
       </div>
+      {prefs.toolbar === 'top' && (
+        <div className="tb-center">
+          <Toolbar docked />
+        </div>
+      )}
       <div className="tb-right">
+        <button className="icon-btn" title={`Quick actions (${MOD}/)`} onClick={() => set({ paletteOpen: true })}>
+          <Icons.search />
+        </button>
         <Avatars />
         <button className="icon-btn" title="Version history" onClick={() => setModal('versions')}>
           <Icons.history />
@@ -381,6 +434,11 @@ export function TopBar() {
   );
 }
 
+const FRAMES: [Tool, () => JSX.Element, string, string][] = [
+  ['frame', Icons.frame, 'Frame', 'F'],
+  ['section', Icons.section, 'Section', '⇧S'],
+];
+
 const SHAPES: [Tool, () => JSX.Element, string, string][] = [
   ['rect', Icons.rect, 'Rectangle', 'R'],
   ['line', Icons.line, 'Line', 'L'],
@@ -390,99 +448,108 @@ const SHAPES: [Tool, () => JSX.Element, string, string][] = [
   ['star', Icons.star, 'Star', ''],
 ];
 
-export function Toolbar() {
+/** Split button: last-used tool + caret menu (Figma's tool groups). */
+function ToolGroup({ items, docked, extra }: { items: [Tool, () => JSX.Element, string, string][]; docked?: boolean; extra?: React.ReactNode }) {
+  const tool = useStore((s) => s.tool);
+  const [open, setOpen] = useState(false);
+  const [last, setLast] = useState<Tool>(items[0][0]);
+  const ref = useOutside(open, () => setOpen(false));
+  const setTool = useStore.getState().setTool;
+  const active = items.some(([t]) => t === tool);
+  const current = items.find(([t]) => t === (active ? tool : last)) ?? items[0];
+  const CurIcon = current[1];
+  return (
+    <div className="tool-split" ref={ref}>
+      <button className={`tool${active ? ' active' : ''}`} title={`${current[2]}${current[3] ? ` (${current[3]})` : ''}`} aria-pressed={active} onClick={() => setTool(current[0])}>
+        <CurIcon />
+      </button>
+      <button className="tool-caret" title={`More ${items[0][2].toLowerCase()} tools`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {docked ? <Icons.chevronDown /> : <Icons.caretUp />}
+      </button>
+      {open && (
+        <div className={`menu ${docked ? 'down' : 'up'}`} role="menu" onClick={() => setOpen(false)}>
+          {items.map(([t, Icon, label, key]) => (
+            <button
+              key={t}
+              role="menuitem"
+              className="menu-item"
+              onClick={() => {
+                setTool(t);
+                setLast(t);
+              }}
+            >
+              <span className="menu-icon-label">
+                <span className="check-mark">{tool === t ? '✓' : ''}</span>
+                <Icon /> {label}
+              </span>
+              <span className="menu-keys">{key}</span>
+            </button>
+          ))}
+          {extra}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function Toolbar({ docked }: { docked?: boolean }) {
   const tool = useStore((s) => s.tool);
   const readOnly = useStore((s) => s.readOnly);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [shapeMenu, setShapeMenu] = useState(false);
-  const [lastShape, setLastShape] = useState<Tool>('rect');
   const extOpen = useStore((s) => s.extensionsOpen);
-  const shapeRef = useOutside(shapeMenu, () => setShapeMenu(false));
+  const prefs = useUiPrefs();
+  const fileRef = useRef<HTMLInputElement>(null);
   const setTool = useStore.getState().setTool;
-  const shapeActive = SHAPES.some(([t]) => t === tool);
-  const current = SHAPES.find(([t]) => t === (shapeActive ? tool : lastShape)) ?? SHAPES[0];
-  const CurIcon = current[1];
+  if (!docked && prefs.toolbar === 'top') return null;
+  const btn = (t: Tool, Icon: () => JSX.Element, title: string) => (
+    <button className={`tool${tool === t ? ' active' : ''}`} title={title} aria-pressed={tool === t} onClick={() => setTool(t)}>
+      <Icon />
+    </button>
+  );
+  const cls = `toolbar${docked ? ' docked' : ''}`;
 
   if (readOnly)
     return (
-      <div className="toolbar">
-        <button className={`tool${tool === 'select' ? ' active' : ''}`} title="Move (V)" onClick={() => setTool('select')}>
-          <Icons.select />
-        </button>
-        <button className={`tool${tool === 'hand' ? ' active' : ''}`} title="Hand tool (H)" onClick={() => setTool('hand')}>
-          <Icons.hand />
-        </button>
+      <div className={cls} role="toolbar" aria-label="Tools">
+        {btn('select', Icons.select, 'Move (V)')}
+        {btn('hand', Icons.hand, 'Hand tool (H)')}
         <span className="tool-sep" />
         <span className="muted view-only">View only</span>
       </div>
     );
 
   return (
-    <div className="toolbar">
-      <button className={`tool${tool === 'select' ? ' active' : ''}`} title="Move (V)" onClick={() => setTool('select')}>
-        <Icons.select />
-      </button>
-      <button className={`tool${tool === 'frame' ? ' active' : ''}`} title="Frame (F)" onClick={() => setTool('frame')}>
-        <Icons.frame />
-      </button>
-      <div className="tool-split" ref={shapeRef}>
-        <button className={`tool${shapeActive ? ' active' : ''}`} title={`${current[2]} (${current[3] || '—'})`} onClick={() => setTool(current[0])}>
-          <CurIcon />
-        </button>
-        <button className="tool-caret" title="Shape tools" onClick={() => setShapeMenu(!shapeMenu)}>
-          <Icons.caretUp />
-        </button>
-        {shapeMenu && (
-          <div className="menu up">
-            {SHAPES.map(([t, Icon, label, key]) => (
-              <button
-                key={t}
-                className="menu-item"
-                onClick={() => {
-                  setTool(t);
-                  setLastShape(t);
-                  setShapeMenu(false);
-                }}
-              >
-                <span className="menu-icon-label">
-                  <Icon /> {label}
-                </span>
-                <span className="menu-keys">{key}</span>
-              </button>
-            ))}
+    <div className={cls} role="toolbar" aria-label="Tools">
+      {btn('select', Icons.select, 'Move (V)')}
+      <ToolGroup items={FRAMES} docked={docked} />
+      <ToolGroup
+        items={SHAPES}
+        docked={docked}
+        extra={
+          <>
             <div className="menu-sep" />
-            <button
-              className="menu-item"
-              onClick={() => {
-                fileRef.current?.click();
-                setShapeMenu(false);
-              }}
-            >
+            <button className="menu-item" onClick={() => fileRef.current?.click()}>
               <span className="menu-icon-label">
+                <span className="check-mark" />
                 <Icons.image /> Place image…
               </span>
               <span className="menu-keys">⇧{MOD}K</span>
             </button>
-          </div>
-        )}
-      </div>
-      <button className={`tool${tool === 'pen' ? ' active' : ''}`} title="Pen (P)" onClick={() => setTool('pen')}>
-        <Icons.pen />
-      </button>
-      <button className={`tool${tool === 'text' ? ' active' : ''}`} title="Text (T)" onClick={() => setTool('text')}>
-        <Icons.text />
-      </button>
-      <button className={`tool${tool === 'hand' ? ' active' : ''}`} title="Hand tool (H)" onClick={() => setTool('hand')}>
-        <Icons.hand />
-      </button>
+          </>
+        }
+      />
+      {btn('pen', Icons.pen, 'Pen (P), drag to curve')}
+      {btn('text', Icons.text, 'Text (T)')}
+      {btn('hand', Icons.hand, 'Hand tool (H)')}
+      {btn('scale', Icons.scale, 'Scale (K)')}
       <span className="tool-sep" />
-      <button className={`tool${tool === 'comment' ? ' active' : ''}`} title="Comment (C)" onClick={() => setTool('comment')}>
-        <Icons.comment />
-      </button>
-      <button className={`tool${extOpen ? ' active' : ''}`} title={`Extensions (${MOD}/)`} onClick={() => useStore.getState().set({ extensionsOpen: true })}>
+      {btn('comment', Icons.comment, 'Comment (C)')}
+      <button id="btn-extensions" className={`tool${extOpen ? ' active' : ''}`} title="Extensions" onClick={() => useStore.getState().set({ extensionsOpen: true })}>
         <Icons.puzzle />
       </button>
-      {extOpen && <ExtensionsModal onClose={() => useStore.getState().set({ extensionsOpen: false })} />}
+      <button className="tool actions" title={`Actions (${MOD}/)`} onClick={() => useStore.getState().set({ paletteOpen: true })}>
+        <Icons.command />
+        {!docked && <span>Actions</span>}
+      </button>
       <input
         id="place-image"
         ref={fileRef}
@@ -505,32 +572,61 @@ export function Present() {
   const pageId = useStore((s) => s.pageId);
   const frames = topFrames(doc, pageId);
   const n = frameId ? doc.nodes[frameId] : null;
+  const [history, setHistory] = useState<string[]>([]);
+  const [anim, setAnim] = useState<{ t: Transition; back: boolean }>({ t: 'instant', back: false });
+  const [hotspots, setHotspots] = useState(false);
+
+  const go = (id: string, t: Transition = 'dissolve', back = false) => {
+    const s = useStore.getState();
+    if (!back && s.presenting) setHistory((h) => [...h, s.presenting!]);
+    setAnim({ t, back });
+    s.set({ presenting: id });
+  };
+  const goBack = () => {
+    const prev = history[history.length - 1];
+    if (!prev) return;
+    setHistory((h) => h.slice(0, -1));
+    go(prev, anim.t, true);
+  };
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       const s = useStore.getState();
       const i = frames.findIndex((f) => f.id === s.presenting);
       if (e.key === 'Escape') s.set({ presenting: null });
-      if (e.key === 'ArrowRight' && i < frames.length - 1) s.set({ presenting: frames[i + 1].id });
-      if (e.key === 'ArrowLeft' && i > 0) s.set({ presenting: frames[i - 1].id });
+      if (e.key === 'ArrowRight' && i < frames.length - 1) go(frames[i + 1].id, 'slide-left');
+      if (e.key === 'ArrowLeft' && i > 0) go(frames[i - 1].id, 'slide-right');
+      if (e.key === 'Backspace') goBack();
     };
     window.addEventListener('keydown', k);
     return () => window.removeEventListener('keydown', k);
-  }, [frames]);
+  });
 
   if (!n) return null;
   const click = (e: React.MouseEvent) => {
     let id = (e.target as Element).closest('[data-id]')?.getAttribute('data-id') ?? null;
     while (id) {
       const node = doc.nodes[id];
-      if (node?.link && doc.nodes[node.link]) return useStore.getState().set({ presenting: node.link });
+      if (node?.link === '__back') return goBack();
+      if (node?.link && doc.nodes[node.link]) return go(node.link, node.linkTransition ?? 'dissolve');
       id = node?.parentId ?? null;
     }
+    // Missed: briefly highlight what's clickable.
+    setHotspots(true);
+    setTimeout(() => setHotspots(false), 700);
   };
+  const cls = anim.back && anim.t.startsWith('slide') ? { 'slide-left': 'slide-right', 'slide-right': 'slide-left', 'slide-up': 'slide-down', 'slide-down': 'slide-up' }[anim.t as 'slide-left'] : anim.t;
   return (
     <div className="present">
       <div className="present-bar">
-        <span>{n.name}</span>
+        <span className="row tight">
+          {history.length > 0 && (
+            <button className="btn small" onClick={goBack}>
+              ← Back
+            </button>
+          )}
+          <span>{n.name}</span>
+        </span>
         <span className="muted">
           {frames.findIndex((f) => f.id === n.id) + 1} / {frames.length}
         </span>
@@ -538,9 +634,11 @@ export function Present() {
           Close
         </button>
       </div>
-      <svg key={n.id} className="present-frame" viewBox={`${n.x} ${n.y} ${n.w} ${n.h}`} preserveAspectRatio="xMidYMid meet" onClick={click}>
-        {renderNode({ doc, interactive: true, prefix: 'p-', depth: 0, zoom: 1 }, n.id)}
-      </svg>
+      <div className="present-stage">
+        <svg key={n.id} className={`present-frame t-${cls}${hotspots ? ' show-hotspots' : ''}`} viewBox={`${n.x} ${n.y} ${n.w} ${n.h}`} preserveAspectRatio="xMidYMid meet" onClick={click}>
+          {renderNode({ doc, interactive: true, prefix: 'p-', depth: 0, zoom: 1 }, n.id)}
+        </svg>
+      </div>
     </div>
   );
 }

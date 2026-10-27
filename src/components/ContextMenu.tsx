@@ -11,6 +11,7 @@ import {
   duplicateSelection,
   flattenSelection,
   flipSelection,
+  useAsMask,
   groupSelection,
   paste,
   pasteProperties,
@@ -72,6 +73,7 @@ export default function ContextMenu({ at, onClose }: { at: { x: number; y: numbe
         { label: 'Flip horizontal', keys: '⇧H', run: () => flipSelection('h'), disabled: readOnly },
         { label: 'Flip vertical', keys: '⇧V', run: () => flipSelection('v'), disabled: readOnly },
         { label: 'Flatten', keys: `${mod}E`, run: flattenSelection, disabled: readOnly },
+        { label: nodes.length === 1 && nodes[0].isMask ? 'Release mask' : 'Use as mask', keys: `${alt}${mod}M`, run: useAsMask, disabled: readOnly || (nodes.length < 2 && !nodes[0]?.isMask) },
         ...(nodes.length > 1
           ? ([
               { label: 'Union selection', run: () => booleanOp('union'), disabled: readOnly },
