@@ -1,0 +1,347 @@
+import type { Doc, NodeType, Page, Pt, SceneNode } from './types';
+
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
+
+export const TYPE_NAMES: Record<NodeType, string> = {
+  frame: 'Frame',
+  group: 'Group',
+  component: 'Component',
+  instance: 'Instance',
+  rect: 'Rectangle',
+  ellipse: 'Ellipse',
+  path: 'Vector',
+  text: 'Text',
+  image: 'Image',
+};
+
+export const isContainer = (n: SceneNode) => n.type === 'frame' || n.type === 'component' || n.type === 'group';
+export const isFrameLike = (n: SceneNode) => n.type === 'frame' || n.type === 'component';
+
+export function makeNode(type: NodeType, pageId: string, props: Partial<SceneNode> = {}): SceneNode {
+  const n: SceneNode = {
+    id: uid(),
+    type,
+    name: TYPE_NAMES[type],
+    pageId,
+    parentId: null,
+    children: [],
+    x: 0,
+    y: 0,
+    w: 100,
+    h: 100,
+    rotation: 0,
+    fill: null,
+    stroke: null,
+    strokeWidth: 1,
+    radius: 0,
+    opacity: 1,
+    visible: true,
+    locked: false,
+  };
+  if (type === 'frame' || type === 'component') {
+    n.fill = '#ffffff';
+    n.clip = true;
+  }
+  if (type === 'rect' || type === 'ellipse') n.fill = '#d9d9d9';
+  if (type === 'path') {
+    n.stroke = '#1e1e1e';
+    n.points = [];
+    n.closed = false;
+  }
+  if (type === 'text') {
+    Object.assign(n, { fill: '#1e1e1e', text: '', fontSize: 24, fontWeight: 400, fontFamily: 'Inter', textAlign: 'left', lineHeight: 1.2 });
+  }
+  return Object.assign(n, props);
+}
+
+export function newDoc(): Doc {
+  const page: Page = { id: uid(), name: 'Page 1', children: [], bg: '#f5f5f5' };
+  return { pages: [page], nodes: {} };
+}
+
+export const getPage = (d: Doc, id: string) => d.pages.find((p) => p.id === id) ?? d.pages[0];
+
+export function nextName(d: Doc, type: NodeType) {
+  let k = 0;
+  for (const id in d.nodes) if (d.nodes[id].type === type) k++;
+  return `${TYPE_NAMES[type]} ${k + 1}`;
+}
+
+export function siblings(d: Doc, n: SceneNode): string[] {
+  return n.parentId ? d.nodes[n.parentId].children : getPage(d, n.pageId).children;
+}
+
+export function descendants(d: Doc, id: string, out: string[] = []): string[] {
+  for (const c of d.nodes[id]?.children ?? []) {
+    out.push(c);
+    descendants(d, c, out);
+  }
+  return out;
+}
+
+/** Chain of ids from the root down to `id` (inclusive). */
+export function ancestry(d: Doc, id: string): string[] {
+  const chain: string[] = [];
+  let cur: string | null = id;
+  while (cur && d.nodes[cur]) {
+    chain.unshift(cur);
+    cur = d.nodes[cur].parentId;
+  }
+  return chain;
+}
+
+export function isAncestor(d: Doc, anc: string, id: string): boolean {
+  let p = d.nodes[id]?.parentId ?? null;
+  while (p) {
+    if (p === anc) return true;
+    p = d.nodes[p]?.parentId ?? null;
+  }
+  return false;
+}
+
+function depthOf(d: Doc, id: string) {
+  let k = 0;
+  let p = d.nodes[id].parentId;
+  while (p) {
+    k++;
+    p = d.nodes[p].parentId;
+  }
+  return k;
+}
+
+function place(arr: string[], id: string, index?: number) {
+  if (index === undefined || index < 0 || index > arr.length) arr.push(id);
+  else arr.splice(index, 0, id);
+}
+
+export function detach(d: Doc, id: string): number {
+  const s = siblings(d, d.nodes[id]);
+  const i = s.indexOf(id);
+  if (i >= 0) s.splice(i, 1);
+  return i;
+}
+
+function setPageDeep(d: Doc, id: string, pageId: string) {
+  d.nodes[id].pageId = pageId;
+  for (const c of d.nodes[id].children) setPageDeep(d, c, pageId);
+}
+
+export function insert(d: Doc, n: SceneNode, parentId: string | null, index?: number) {
+  n.parentId = parentId;
+  if (parentId) n.pageId = d.nodes[parentId].pageId;
+  d.nodes[n.id] = n;
+  place(siblings(d, d.nodes[n.id]), n.id, index);
+}
+
+export function moveTo(d: Doc, id: string, parentId: string | null, pageId: string, index?: number) {
+  detach(d, id);
+  const n = d.nodes[id];
+  n.parentId = parentId;
+  setPageDeep(d, id, parentId ? d.nodes[parentId].pageId : pageId);
+  place(siblings(d, n), id, index);
+}
+
+export function removeNode(d: Doc, id: string) {
+  if (!d.nodes[id]) return;
+  detach(d, id);
+  for (const k of [id, ...descendants(d, id)]) delete d.nodes[k];
+}
+
+export function moveDeep(d: Doc, id: string, dx: number, dy: number) {
+  if (!dx && !dy) return;
+  const n = d.nodes[id];
+  n.x += dx;
+  n.y += dy;
+  for (const c of n.children) moveDeep(d, c, dx, dy);
+}
+
+export function cloneSubtree(src: Doc, id: string, dst: Doc, parentId: string | null, pageId: string, index?: number, dx = 0, dy = 0): string {
+  const o = src.nodes[id];
+  const n: SceneNode = { ...JSON.parse(JSON.stringify(o)), id: uid(), children: [], x: o.x + dx, y: o.y + dy, pageId };
+  insert(dst, n, parentId, index);
+  for (const c of [...o.children]) cloneSubtree(src, c, dst, n.id, pageId, undefined, dx, dy);
+  return n.id;
+}
+
+/** One axis of a child's constraint when its frame goes from (o0, oS) to (n0, nS). */
+function constrain(c: string, o0: number, oS: number, n0: number, nS: number, p: number, s: number): [number, number] {
+  const rel = p - o0;
+  const far = oS - rel - s;
+  switch (c) {
+    case 'right':
+    case 'bottom':
+      return [n0 + nS - far - s, s];
+    case 'leftright':
+    case 'topbottom':
+      return [n0 + rel, Math.max(0, nS - rel - far)];
+    case 'center':
+      return [n0 + nS / 2 + (rel + s / 2 - oS / 2) - s / 2, s];
+    case 'scale': {
+      const k = oS ? nS / oS : 1;
+      return [n0 + rel * k, s * k];
+    }
+    default:
+      return [n0 + rel, s];
+  }
+}
+
+/** Move/resize a node to a box. Groups scale their contents; frames apply child constraints. */
+export function resizeTo(d: Doc, id: string, nb: Box) {
+  const n = d.nodes[id];
+  const ob = { x: n.x, y: n.y, w: n.w, h: n.h };
+  if (n.type === 'group') {
+    const sx = ob.w ? nb.w / ob.w : 1;
+    const sy = ob.h ? nb.h / ob.h : 1;
+    for (const c of descendants(d, id)) {
+      const k = d.nodes[c];
+      k.x = nb.x + (k.x - ob.x) * sx;
+      k.y = nb.y + (k.y - ob.y) * sy;
+      k.w *= sx;
+      k.h *= sy;
+      if (k.type === 'text') k.fontSize = Math.max(1, (k.fontSize ?? 16) * sy);
+    }
+  } else if (isFrameLike(n) && !n.autoLayout) {
+    for (const c of n.children) {
+      const k = d.nodes[c];
+      const con = k.constraints ?? { h: 'left', v: 'top' };
+      const [x, w] = constrain(con.h, ob.x, ob.w, nb.x, nb.w, k.x, k.w);
+      const [y, h] = constrain(con.v, ob.y, ob.h, nb.y, nb.h, k.y, k.h);
+      if ((w !== k.w || h !== k.h) && k.type !== 'text') resizeTo(d, c, { x, y, w, h });
+      else moveDeep(d, c, x - k.x, y - k.y);
+    }
+  } else if (n.children.length) {
+    for (const c of n.children) moveDeep(d, c, nb.x - ob.x, nb.y - ob.y);
+  }
+  n.x = nb.x;
+  n.y = nb.y;
+  n.w = Math.max(0, nb.w);
+  n.h = Math.max(0, nb.h);
+}
+
+export const setSize = (d: Doc, id: string, w: number, h: number) => resizeTo(d, id, { x: d.nodes[id].x, y: d.nodes[id].y, w, h });
+
+export function bbox(ns: Box[]): Box | null {
+  if (!ns.length) return null;
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const n of ns) {
+    x1 = Math.min(x1, n.x);
+    y1 = Math.min(y1, n.y);
+    x2 = Math.max(x2, n.x + n.w);
+    y2 = Math.max(y2, n.y + n.h);
+  }
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+}
+
+export const inside = (p: Pt, b: Box) => p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h;
+export const intersects = (a: Box, b: Box) => a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+
+/** Absolute polyline → node box + normalised points. */
+export function pathFromAbs(pts: Pt[]) {
+  const b = bbox(pts.map((p) => ({ ...p, w: 0, h: 0 })))!;
+  return {
+    x: b.x,
+    y: b.y,
+    w: b.w,
+    h: b.h,
+    points: pts.map((p) => ({ x: b.w ? (p.x - b.x) / b.w : 0, y: b.h ? (p.y - b.y) / b.h : 0 })),
+  };
+}
+
+/** Deepest visible frame/component under a point (used for parenting). */
+export function frameAt(d: Doc, p: Pt, pageId: string, exclude?: string): string | null {
+  const visit = (ids: string[]): string | null => {
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const n = d.nodes[ids[i]];
+      if (!n || !n.visible || n.id === exclude) continue;
+      if (isFrameLike(n) && inside(p, n)) return visit(n.children) ?? n.id;
+      if (n.type === 'group') {
+        const r = visit(n.children);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  return visit(getPage(d, pageId).children);
+}
+
+let measureCtx: CanvasRenderingContext2D | null = null;
+const widthCache = new Map<string, number>();
+
+/** Drop cached text widths (call when web fonts finish loading). */
+export const clearTextCache = () => widthCache.clear();
+
+function measureText(n: SceneNode) {
+  if (typeof document === 'undefined') return;
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  if (!measureCtx) return;
+  const size = n.fontSize ?? 16;
+  const font = `${n.fontWeight ?? 400} ${size}px "${n.fontFamily ?? 'Inter'}", system-ui, sans-serif`;
+  const ls = n.letterSpacing ?? 0;
+  const lines = (n.text ?? '').split('\n');
+  let w = 1;
+  for (const line of lines) {
+    const key = font + '|' + line;
+    let lw = widthCache.get(key);
+    if (lw === undefined) {
+      measureCtx.font = font;
+      lw = measureCtx.measureText(line).width;
+      if (widthCache.size > 5000) widthCache.clear();
+      widthCache.set(key, lw);
+    }
+    w = Math.max(w, lw + ls * line.length);
+  }
+  n.w = Math.ceil(w);
+  n.h = Math.round(lines.length * size * (n.lineHeight ?? 1.2) * 100) / 100;
+}
+
+function layoutAuto(d: Doc, f: SceneNode) {
+  const al = f.autoLayout!;
+  const hz = al.direction === 'horizontal';
+  const kids = f.children.map((c) => d.nodes[c]).filter((k) => k && k.visible);
+  const cross = Math.max(0, ...kids.map((k) => (hz ? k.h : k.w)));
+  const t = al.align === 'center' ? 0.5 : al.align === 'end' ? 1 : 0;
+  let cur = al.padding;
+  for (const k of kids) {
+    const tx = hz ? f.x + cur : f.x + al.padding + (cross - k.w) * t;
+    const ty = hz ? f.y + al.padding + (cross - k.h) * t : f.y + cur;
+    moveDeep(d, k.id, tx - k.x, ty - k.y);
+    cur += (hz ? k.w : k.h) + al.gap;
+  }
+  const main = kids.length ? cur - al.gap + al.padding : al.padding * 2;
+  const crossSize = cross + al.padding * 2;
+  if (hz) {
+    f.w = main;
+    f.h = crossSize;
+  } else {
+    f.w = crossSize;
+    f.h = main;
+  }
+}
+
+/** Derived geometry: text auto-size, group bounds, auto layout. Runs after every edit. */
+export function layoutAll(d: Doc) {
+  const list: SceneNode[] = [];
+  for (const id in d.nodes) {
+    const n = d.nodes[id];
+    if (n.type === 'text') measureText(n);
+    if (n.type === 'group' || n.autoLayout) list.push(n);
+  }
+  list.sort((a, b) => depthOf(d, b.id) - depthOf(d, a.id));
+  for (const n of list) {
+    if (!d.nodes[n.id]) continue;
+    if (n.type === 'group') {
+      if (!n.children.length) {
+        removeNode(d, n.id);
+        continue;
+      }
+      Object.assign(n, bbox(n.children.map((c) => d.nodes[c])));
+    } else layoutAuto(d, n);
+  }
+}
