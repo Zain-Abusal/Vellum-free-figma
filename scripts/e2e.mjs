@@ -3,7 +3,8 @@
 // Set CHROME_PATH if Chrome isn't at /usr/bin/google-chrome. Screenshots go to ./test-results/.
 import { preview } from 'vite';
 import { chromium } from 'playwright-core';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import gifenc from 'gifenc';
 
 const OUT = 'test-results';
 mkdirSync(OUT, { recursive: true });
@@ -222,6 +223,28 @@ try {
   check((await a.locator('.layer-row:has-text("Heart")').count()) === 1, 'pasted SVG imports as editable vectors');
   await a.fill('.layers .search input', '');
   await a.locator('.layers .search input').blur();
+
+  // Animated GIF: pasted as-is (keeps animating), exported as an animated GIF.
+  const anim = gifenc.GIFEncoder();
+  for (const color of [[255, 0, 0], [0, 0, 255]]) {
+    const palette = [color, [255, 255, 255]];
+    anim.writeFrame(new Uint8Array(16 * 16), 16, 16, { palette, delay: 200 });
+  }
+  anim.finish();
+  await a.evaluate((bytes) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array(bytes)], 'Spinner.gif', { type: 'image/gif' }));
+    window.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt }));
+  }, [...anim.bytes()]);
+  await a.waitForTimeout(300);
+  check((await a.locator('.world image[href^="data:image/gif"]').count()) === 1, 'pasted GIF keeps its original (animated) data');
+  await a.click('[title="Add export setting"]');
+  await a.locator('.export-row select').nth(1).selectOption('gif');
+  const [gifDownload] = await Promise.all([a.waitForEvent('download'), a.click('.btn.wide:has-text("Export")')]);
+  const gifBytes = readFileSync(await gifDownload.path());
+  const gifFrames = gifBytes.toString('latin1').split('\x21\xf9\x04').length - 1;
+  check(gifDownload.suggestedFilename().endsWith('.gif') && gifBytes.toString('latin1', 0, 6) === 'GIF89a' && gifFrames >= 2, `GIF export is animated (${gifFrames} frames)`);
+  await a.keyboard.press('Escape');
 
   // Variants: two components → combine → switch the instance's variant.
   await a.keyboard.press('Escape');

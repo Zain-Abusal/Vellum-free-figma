@@ -18,7 +18,7 @@ A free, browser-based design editor with a Figma-style workflow, its own look, l
 - **Styling**: variables with modes (e.g. Light/Dark), linked color and text styles, solid and gradient fills, solid or dashed strokes, per-corner radius, blend modes, drop and inner shadows, blur, Google Fonts with letter spacing, decoration and wrapping text, document colors.
 - **Prototyping**: click-through links and overlays with dissolve/slide/Smart animate transitions and Back, plus a Present mode. **Inspect** gives CSS, Tailwind and React code.
 - **Files**: unlimited files and pages, works offline, autosaved to IndexedDB with a localStorage backup, unlimited named versions.
-- **Export**: PNG / JPG / SVG / PDF at any scale, several presets per layer, ZIP bundles, embedded fonts, copy as PNG / SVG / CSS.
+- **Export**: PNG / JPG / SVG / PDF / GIF (animated when the layer contains animated GIFs) at any scale, several presets per layer, ZIP bundles, embedded fonts, copy as PNG / SVG / CSS.
 - **Live collaboration**: invite links (edit or view-only, resettable to revoke access), real-time sync, live cursors and selections, avatars, comments.
 - **AI agents (MCP)**: connect Claude or any MCP client to a live file. It sees who's online and what they selected, follows edits live, renders and edits the design, and shows its own 🤖 cursor.
 - **Extensions**: 19 built-in plugins, plus third-party extensions installed from a URL and run in a sandbox (QR code, avatars, blobs, tables, shadow presets, emoji, HTML export, radial repeat, icons, placeholder images, lorem ipsum, palettes, contrast checker, batch rename, find & replace, grid, clean-up, random data, charts), plus your own.

@@ -2,7 +2,7 @@ export type NodeType = 'frame' | 'group' | 'component' | 'instance' | 'rect' | '
 
 export type Tool = 'select' | 'hand' | 'frame' | 'section' | 'rect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'star' | 'pen' | 'text' | 'comment' | 'scale';
 
-export type ExportFormat = 'png' | 'jpg' | 'svg' | 'pdf';
+export type ExportFormat = 'png' | 'jpg' | 'svg' | 'pdf' | 'gif';
 
 export interface Pt {
   x: number;

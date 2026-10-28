@@ -149,6 +149,7 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ✅ Per-file remembered camera and page
 - ✅ Version history (named, restore)
 - ✅ Export PNG/JPG/SVG/PDF, multiple export settings per layer, ZIP bundling, embedded web fonts
+- ✅ GIF support: GIFs import untouched (keep animating on canvas/present); GIF export (`gifenc`), animated when the layer contains animated GIFs (decoded with WebCodecs `ImageDecoder`, max 15 s / 300 frames; static fallback)
 - ✅ Copy as PNG / SVG / CSS
 - ✅ Import / download `.json`
 - ⬜ Import `.fig` files (closed format, so probably never; SVG import is more realistic)
@@ -171,6 +172,8 @@ Legend: ✅ done · 🟡 partial · ⬜ not started
 - ✅ Third-party extensions from a URL, sandboxed in an opaque-origin iframe with a whitelisted API bridge
 
 ## Changelog
+
+- **2026-10-28**: GIF export (issue #1): new `gif` export format, animated output for layers containing animated GIFs, e2e test.
 
 - **2026-10-27**: v0.6. Fixed: remote edits crashing sync for clients with undo history (no live edits), unvalidated presence able to crash collaborators, file-name sync race, auto-layout fill/stretch layout, flatten deleting frame contents, stale layer drag, MCP pageId, SVG import, localStorage eviction. Added: live booleans, variants, variables & modes, image crop/tile, SVG import, overlays & smart animate, edit-link revocation, sandboxed URL extensions, MCP `watch_changes`. Refactor: `actions/` modules, `components/panels/`, canvas helpers.
 

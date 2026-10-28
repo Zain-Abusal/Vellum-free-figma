@@ -120,6 +120,7 @@ const canvasBlob = (c: HTMLCanvasElement, type: string) => new Promise<Blob>((re
 
 async function renderBlob(doc: Doc, ids: string[], format: ExportFormat, scale: number): Promise<Blob | null> {
   if (format === 'pdf') return renderPdf(doc, ids, scale);
+  if (format === 'gif') return renderGif(doc, ids, scale);
   const r = toSVG(doc, ids);
   if (!r) return null;
   if (format === 'svg') return new Blob([r.svg], { type: 'image/svg+xml' });
@@ -143,6 +144,84 @@ async function renderPdf(doc: Doc, ids: string[], scale: number): Promise<Blob |
     pdf.addImage(c.toDataURL('image/png'), 'PNG', 0, 0, w, h);
   }
   return pdf ? pdf.output('blob') : null;
+}
+
+/* ---------- GIF (animated when the layers contain animated GIFs) ---------- */
+
+const GIF_MAX_MS = 15_000;
+const GIF_MAX_FRAMES = 300;
+
+/** An animated GIF split into PNG frames with their start times (ms). */
+type GifTrack = { src: string; frames: string[]; times: number[]; total: number };
+
+/** Decodes an animated GIF data URL with WebCodecs. Null when unsupported or not animated. */
+async function decodeGif(src: string): Promise<GifTrack | null> {
+  if (typeof ImageDecoder === 'undefined') return null;
+  const dec = new ImageDecoder({ data: await (await fetch(src)).arrayBuffer(), type: 'image/gif' });
+  try {
+    await Promise.all([dec.tracks.ready, dec.completed]);
+    const count = dec.tracks.selectedTrack?.frameCount ?? 1;
+    if (count < 2) return null;
+    const c = document.createElement('canvas');
+    const frames: string[] = [];
+    const times: number[] = [];
+    let t = 0;
+    for (let i = 0; i < count && t < GIF_MAX_MS; i++) {
+      const { image } = await dec.decode({ frameIndex: i });
+      c.width = image.displayWidth;
+      c.height = image.displayHeight;
+      c.getContext('2d')!.drawImage(image, 0, 0);
+      const ms = (image.duration ?? 0) / 1000;
+      image.close();
+      frames.push(c.toDataURL('image/png'));
+      times.push(t);
+      t += ms > 10 ? ms : 100; // browsers play tiny delays at 100 ms
+    }
+    return { src, frames, times, total: t };
+  } finally {
+    dec.close();
+  }
+}
+
+const frameAt = (tr: GifTrack, t: number) => {
+  const local = t % tr.total;
+  let i = 0;
+  while (i + 1 < tr.times.length && tr.times[i + 1] <= local) i++;
+  return i;
+};
+
+/** Renders the layers to a GIF. Animated GIFs inside play along; otherwise it's a single frame. */
+async function renderGif(doc: Doc, ids: string[], scale: number): Promise<Blob | null> {
+  const r = toSVG(doc, ids);
+  if (!r) return null;
+  const svg = await withFonts(r.svg, doc, ids);
+  const srcs = [...new Set(svg.match(/data:image\/gif[^"']*/g) ?? [])];
+  const tracks = (await Promise.all(srcs.map((s) => decodeGif(s).catch(() => null)))).filter((t): t is GifTrack => !!t);
+  const total = Math.min(GIF_MAX_MS, Math.max(0, ...tracks.map((t) => t.total)));
+  // A new output frame wherever any GIF changes frame (all loop until the longest one ends).
+  const changes = new Set([0]);
+  for (const tr of tracks) for (let base = 0; base < total; base += tr.total) for (const t of tr.times) if (base + t < total) changes.add(Math.round(base + t));
+  let ticks = [...changes].sort((a, b) => a - b);
+  if (ticks.length > GIF_MAX_FRAMES) ticks = ticks.filter((_, i) => i % Math.ceil(ticks.length / GIF_MAX_FRAMES) === 0);
+
+  const { GIFEncoder, quantize, applyPalette } = await import('gifenc');
+  const gif = GIFEncoder();
+  for (let i = 0; i < ticks.length; i++) {
+    let frameSvg = svg;
+    for (const tr of tracks) frameSvg = frameSvg.split(tr.src).join(tr.frames[frameAt(tr, ticks[i])]);
+    const c = await rasterCanvas(frameSvg, r.box, scale);
+    const { data } = c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+    const palette = quantize(data, 256, { format: 'rgba4444', oneBitAlpha: true });
+    const transparentIndex = palette.findIndex((p) => p[3] === 0);
+    gif.writeFrame(applyPalette(data, palette, 'rgba4444'), c.width, c.height, {
+      palette,
+      delay: (ticks[i + 1] ?? total) - ticks[i],
+      transparent: transparentIndex >= 0,
+      transparentIndex,
+    });
+  }
+  gif.finish();
+  return new Blob([gif.bytes()], { type: 'image/gif' });
 }
 
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, '').trim() || 'export';

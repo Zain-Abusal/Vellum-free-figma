@@ -24,6 +24,7 @@ export function ExportRows({ rows, onChange }: { rows: ExportSetting[]; onChange
             <option value="jpg">JPG</option>
             <option value="svg">SVG</option>
             <option value="pdf">PDF</option>
+            <option value="gif">GIF</option>
           </select>
           <RemoveBtn title="Remove export" onClick={() => onChange(rows.filter((_, j) => j !== i))} />
         </div>
